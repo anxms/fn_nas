@@ -5,9 +5,6 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 import asyncssh
 import json
 
-from .disk_manager import DiskManager
-from .system_manager import SystemManager
-
 from .const import (
     DOMAIN, CONF_HOST, CONF_PORT, CONF_USERNAME, CONF_PASSWORD,
     CONF_IGNORE_DISKS, CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL,
