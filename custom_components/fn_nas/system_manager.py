@@ -52,7 +52,6 @@ class SystemManager:
             mobo_temp = self.extract_mobo_temp(sensors_output)
             system_info["motherboard_temperature"] = mobo_temp
             
-            
             # 尝试备用方法获取CPU温度
             if cpu_temp == "未知":
                 backup_cpu_temp = await self.get_cpu_temp_fallback()
@@ -62,10 +61,12 @@ class SystemManager:
             return system_info
             
         except Exception as e:
+            self.logger.error("Error getting system info: %s", str(e))
             return {
                 "uptime_seconds": 0,
                 "uptime": "未知",
-                # ... 其他字段 ...
+                "cpu_temperature": "未知",
+                "motherboard_temperature": "未知"
             }
     
     def save_sensor_data_for_debug(self, sensors_output: str):
@@ -346,13 +347,32 @@ class SystemManager:
         self.logger.warning("No motherboard temperature found in sensors output")
         return "未知"
     
-    
     async def reboot_system(self):
+        """重启系统"""
         self.logger.info("Initiating system reboot...")
-        await self.coordinator.run_command("sudo reboot")
-        self.logger.info("Reboot command sent")
+        try:
+            await self.coordinator.run_command("sudo reboot")
+            self.logger.info("Reboot command sent")
+            
+            # 更新系统状态为重启中
+            if "system" in self.coordinator.data:
+                self.coordinator.data["system"]["status"] = "rebooting"
+                self.coordinator.async_update_listeners()
+        except Exception as e:
+            self.logger.error("Failed to reboot system: %s", str(e))
+            raise
     
     async def shutdown_system(self):
+        """关闭系统"""
         self.logger.info("Initiating system shutdown...")
-        await self.coordinator.run_command("sudo poweroff")
-        self.logger.info("Shutdown command sent")
+        try:
+            await self.coordinator.run_command("sudo poweroff")
+            self.logger.info("Shutdown command sent")
+            
+            # 立即更新系统状态为关闭
+            if "system" in self.coordinator.data:
+                self.coordinator.data["system"]["status"] = "off"
+                self.coordinator.async_update_listeners()
+        except Exception as e:
+            self.logger.error("Failed to shutdown system: %s", str(e))
+            raise

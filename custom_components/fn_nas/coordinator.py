@@ -25,7 +25,7 @@ class FlynasCoordinator(DataUpdateCoordinator):
         self.password = config[CONF_PASSWORD]
         self.mac = config.get(CONF_MAC, "")
         self.ssh = None
-        self.ssh_closed = True  # 添加连接状态标志
+        self.ssh_closed = True
         
         scan_interval = config.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
         update_interval = timedelta(seconds=scan_interval)
@@ -53,11 +53,13 @@ class FlynasCoordinator(DataUpdateCoordinator):
                 )
                 self.ssh_closed = False
                 _LOGGER.info("SSH connection established to %s", self.host)
+                return True
             except Exception as e:
                 self.ssh = None
                 self.ssh_closed = True
                 _LOGGER.error("Failed to connect: %s", str(e))
-                raise
+                return False
+        return True
     
     async def async_disconnect(self):
         if self.ssh is not None and not self.ssh_closed:
@@ -85,10 +87,14 @@ class FlynasCoordinator(DataUpdateCoordinator):
     async def run_command(self, command: str, retries=2) -> str:
         for attempt in range(retries):
             try:
-                # 使用更可靠的方式检查连接状态
-                if self.ssh is None or self.ssh_closed or not await self.is_ssh_connected():
-                    _LOGGER.debug("SSH connection not active, reconnecting...")
-                    await self.async_connect()
+                # 检查连接状态
+                if not await self.is_ssh_connected():
+                    # 如果连接断开，尝试重新连接
+                    if not await self.async_connect():
+                        # 如果重新连接失败，更新系统状态为关闭
+                        if "system" in self.data:
+                            self.data["system"]["status"] = "off"
+                        raise UpdateFailed("SSH connection failed")
                 
                 result = await self.ssh.run(command, check=True)
                 return result.stdout.strip()
@@ -100,6 +106,9 @@ class FlynasCoordinator(DataUpdateCoordinator):
                 self.ssh = None
                 self.ssh_closed = True
                 if attempt == retries - 1:
+                    # 更新系统状态为关闭
+                    if "system" in self.data:
+                        self.data["system"]["status"] = "off"
                     raise UpdateFailed(f"Command failed after {retries} attempts: {command}") from e
                 
             except asyncssh.Error as e:
@@ -107,6 +116,9 @@ class FlynasCoordinator(DataUpdateCoordinator):
                 self.ssh = None
                 self.ssh_closed = True
                 if attempt == retries - 1:
+                    # 更新系统状态为关闭
+                    if "system" in self.data:
+                        self.data["system"]["status"] = "off"
                     raise UpdateFailed(f"SSH error after {retries} attempts: {str(e)}") from e
                 
             except Exception as e:
@@ -114,13 +126,25 @@ class FlynasCoordinator(DataUpdateCoordinator):
                 self.ssh_closed = True
                 _LOGGER.error("Unexpected error: %s", str(e), exc_info=True)
                 if attempt == retries - 1:
+                    # 更新系统状态为关闭
+                    if "system" in self.data:
+                        self.data["system"]["status"] = "off"
                     raise UpdateFailed(f"Unexpected error after {retries} attempts") from e
     
     async def _async_update_data(self):
-        # 添加更多调试信息
         _LOGGER.debug("Starting data update...")
         
         try:
+            # 检查SSH连接状态并更新系统状态
+            if await self.is_ssh_connected():
+                status = "on"
+            else:
+                # 尝试重新连接
+                if not await self.async_connect():
+                    status = "off"
+                else:
+                    status = "on"
+            
             # 获取磁盘信息
             disks = await self.disk_manager.get_disks_info()
             _LOGGER.debug("Retrieved %d disks", len(disks))
@@ -129,13 +153,12 @@ class FlynasCoordinator(DataUpdateCoordinator):
             system = await self.system_manager.get_system_info()
             _LOGGER.debug("System info: %s", system)
             
-            
-            # 组合所有数据（添加系统状态）
+            # 组合所有数据
             data = {
                 "disks": disks,
                 "system": {
                     **system,
-                    "status": "on"  # 添加系统状态
+                    "status": status  # 使用检测到的状态
                 },
             }
             
@@ -144,22 +167,19 @@ class FlynasCoordinator(DataUpdateCoordinator):
                 _LOGGER.debug("CPU temperature: %s", system["cpu_temperature"])
             if "motherboard_temperature" in system:
                 _LOGGER.debug("Motherboard temperature: %s", system["motherboard_temperature"])
-            if "fans" in system:
-                for fan in system["fans"]:
-                    _LOGGER.debug("Fan %s: %d RPM", fan["id"], fan["speed"])
             
             return data
         
         except Exception as e:
             _LOGGER.error("Failed to update data: %s", str(e), exc_info=True)
-            # 返回空数据，但保持结构完整
+            # 返回空数据，但设置正确的状态
             return {
                 "disks": [],
                 "system": {
                     "uptime": "未知",
                     "cpu_temperature": "未知",
                     "motherboard_temperature": "未知",
-                    "status": "unknown"
+                    "status": "off"  # 发生错误时设置为关闭状态
                 },
             }
     
@@ -168,4 +188,7 @@ class FlynasCoordinator(DataUpdateCoordinator):
     
     async def shutdown_system(self):
         await self.system_manager.shutdown_system()
-    
+        # 更新状态为关闭
+        if "system" in self.data:
+            self.data["system"]["status"] = "off"
+        self.async_update_listeners()
