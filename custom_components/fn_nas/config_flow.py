@@ -12,10 +12,12 @@ from .const import (
     DEFAULT_PORT, 
     DEFAULT_SCAN_INTERVAL,
     CONF_IGNORE_DISKS,
-    CONF_FAN_CONFIG_PATH
+    CONF_FAN_CONFIG_PATH,
+    CONF_UPS_SCAN_INTERVAL, 
+    DEFAULT_UPS_SCAN_INTERVAL
 )
 
-_LOGGER = logging.getLogger(__name__)  # 现在logging模块已导入
+_LOGGER = logging.getLogger(__name__)
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """处理飞牛NAS的配置流程"""
@@ -75,7 +77,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         # 获取当前配置值
         data = self.config_entry.options or self.config_entry.data
         
-        # 添加忽略磁盘和风扇配置路径选项
+        # 添加忽略磁盘、风扇配置路径和UPS刷新间隔选项
         options = vol.Schema({
             vol.Optional(
                 CONF_IGNORE_DISKS,
@@ -84,7 +86,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             vol.Optional(
                 CONF_FAN_CONFIG_PATH,
                 default=data.get(CONF_FAN_CONFIG_PATH, "")
-            ): str
+            ): str,
+            vol.Optional(
+                CONF_UPS_SCAN_INTERVAL,
+                default=data.get(CONF_UPS_SCAN_INTERVAL, DEFAULT_UPS_SCAN_INTERVAL)
+            ): int
         })
         
         return self.async_show_form(

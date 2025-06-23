@@ -6,13 +6,15 @@ from .const import (
     DOMAIN, HDD_TEMP, HDD_HEALTH, SYSTEM_INFO, ICON_DISK, 
     ICON_TEMPERATURE, ICON_HEALTH, ATTR_DISK_MODEL, ATTR_SERIAL_NO,
     ATTR_POWER_ON_HOURS, ATTR_TOTAL_CAPACITY, ATTR_HEALTH_STATUS,
-    DEVICE_ID_NAS
+    DEVICE_ID_NAS, DATA_UPDATE_COORDINATOR
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
-    coordinator = hass.data[DOMAIN][config_entry.entry_id]["coordinator"]
+    domain_data = hass.data[DOMAIN][config_entry.entry_id]
+    coordinator = domain_data[DATA_UPDATE_COORDINATOR]  # 主协调器
+    ups_coordinator = domain_data["ups_coordinator"]   # UPS协调器
     
     entities = []
     
@@ -46,125 +48,101 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
             )
         )
     
-    # 添加系统信息传感器
-    entities.append(
-        SystemSensor(
-            coordinator,
-            "系统状态",
-            "system_status",
-            None,
-            "mdi:server",
-        )
-    )
-    
-    # 添加CPU温度传感器
-    entities.append(
-        CPUTempSensor(
-            coordinator,
-            "CPU温度",
-            "cpu_temperature",
-            UnitOfTemperature.CELSIUS,
-            "mdi:thermometer",
-        )
-    )
-    
-    # 添加主板温度传感器（可选）
-    """entities.append(
-        MoboTempSensor(
-            coordinator,
-            "主板温度",
-            "motherboard_temperature",
-            UnitOfTemperature.CELSIUS,
-            "mdi:thermometer",
-        )
-    )"""
-
-    # 添加UPS传感器
-    if "ups" in coordinator.data:
-        ups_data = coordinator.data["ups"]
-        
-        from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
-        
+        # 添加系统信息传感器
         entities.append(
-            UPSSensor(
+            SystemSensor(
                 coordinator,
-                "UPS状态",
-                "ups_status",
+                "系统状态",
+                "system_status",
                 None,
-                "mdi:power-plug",
-                "status"
+                "mdi:server",
             )
         )
+        
+        # 添加CPU温度传感器
         entities.append(
-            UPSSensor(
+            CPUTempSensor(
                 coordinator,
-                "UPS电池电量",
-                "ups_battery",
-                "%",
-                "mdi:battery",
-                "battery_level",
-                device_class=SensorDeviceClass.BATTERY,
-                state_class=SensorStateClass.MEASUREMENT
+                "CPU温度",
+                "cpu_temperature",
+                UnitOfTemperature.CELSIUS,
+                "mdi:thermometer",
             )
         )
-        entities.append(
-            UPSSensor(
-                coordinator,
-                "UPS剩余时间",
-                "ups_runtime",
-                "分钟",
-                "mdi:clock",
-                "runtime_remaining",
-                state_class=SensorStateClass.MEASUREMENT
+        # 添加UPS传感器（使用UPS协调器）
+        if ups_coordinator.data:  # 检查是否有UPS数据
+            ups_data = ups_coordinator.data
+            
+            from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
+            
+            entities.append(
+                UPSSensor(
+                    ups_coordinator,  # 使用UPS协调器
+                    "UPS状态",
+                    "ups_status",
+                    None,
+                    "mdi:power-plug",
+                    "status"
+                )
             )
-        )
-        """ entities.append(
-            UPSSensor(
-                coordinator,
-                "UPS输入电压",
-                "ups_input_voltage",
-                "V",
-                "mdi:lightning-bolt",
-                "input_voltage",
-                device_class=SensorDeviceClass.VOLTAGE,
-                state_class=SensorStateClass.MEASUREMENT
+            entities.append(
+                UPSSensor(
+                    ups_coordinator,  # 使用UPS协调器
+                    "UPS电池电量",
+                    "ups_battery",
+                    "%",
+                    "mdi:battery",
+                    "battery_level",
+                    device_class=SensorDeviceClass.BATTERY,
+                    state_class=SensorStateClass.MEASUREMENT
+                )
             )
-        ) """
-        entities.append(
-            UPSSensor(
-                coordinator,
-                "UPS输出电压",
-                "ups_output_voltage",
-                "V",
-                "mdi:lightning-bolt-outline",
-                "output_voltage",
-                device_class=SensorDeviceClass.VOLTAGE,
-                state_class=SensorStateClass.MEASUREMENT
+            entities.append(
+                UPSSensor(
+                    ups_coordinator,  # 使用UPS协调器
+                    "UPS剩余时间",
+                    "ups_runtime",
+                    "分钟",
+                    "mdi:clock",
+                    "runtime_remaining",
+                    state_class=SensorStateClass.MEASUREMENT
+                )
             )
-        )
-        entities.append(
-            UPSSensor(
-                coordinator,
-                "UPS负载",
-                "ups_load",
-                "%",
-                "mdi:gauge",
-                "load_percent",
-                state_class=SensorStateClass.MEASUREMENT
+            entities.append(
+                UPSSensor(
+                    ups_coordinator,  # 使用UPS协调器
+                    "UPS输出电压",
+                    "ups_output_voltage",
+                    "V",
+                    "mdi:lightning-bolt-outline",
+                    "output_voltage",
+                    device_class=SensorDeviceClass.VOLTAGE,
+                    state_class=SensorStateClass.MEASUREMENT
+                )
             )
-        )
-        entities.append(
-            UPSSensor(
-                coordinator,
-                "UPS型号",
-                "ups_model",
-                None,
-                "mdi:information",
-                "model"
+            entities.append(
+                UPSSensor(
+                    ups_coordinator,  # 使用UPS协调器
+                    "UPS负载",
+                    "ups_load",
+                    "%",
+                    "mdi:gauge",
+                    "load_percent",
+                    state_class=SensorStateClass.MEASUREMENT
+                )
             )
-        )
-    
-    async_add_entities(entities)
+            entities.append(
+                UPSSensor(
+                    ups_coordinator,  # 使用UPS协调器
+                    "UPS型号",
+                    "ups_model",
+                    None,
+                    "mdi:information",
+                    "model"
+                )
+            )
+        
+        async_add_entities(entities)
 
 class DiskSensor(CoordinatorEntity, SensorEntity):
     def __init__(self, coordinator, device_id, sensor_type, name, unique_id, unit, icon, disk_info):
@@ -391,19 +369,17 @@ class UPSSensor(CoordinatorEntity, SensorEntity):
     
     @property
     def native_value(self):
-        ups_data = self.coordinator.data.get("ups", {})
-        return ups_data.get(self.data_key)
+        return self.coordinator.data.get(self.data_key)  # 直接使用协调器的数据
     
     @property
     def extra_state_attributes(self):
-        ups_data = self.coordinator.data.get("ups", {})
         attributes = {
-            "最后更新时间": ups_data.get("last_update", "未知"),
-            "UPS类型": ups_data.get("ups_type", "未知")
+            "最后更新时间": self.coordinator.data.get("last_update", "未知"),
+            "UPS类型": self.coordinator.data.get("ups_type", "未知")
         }
         
         # 添加原始字符串值（如果存在）
-        if f"{self.data_key}_str" in ups_data:
-            attributes["原始值"] = ups_data[f"{self.data_key}_str"]
+        if f"{self.data_key}_str" in self.coordinator.data:
+            attributes["原始值"] = self.coordinator.data[f"{self.data_key}_str"]
         
         return attributes

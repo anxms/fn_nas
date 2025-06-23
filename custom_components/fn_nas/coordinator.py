@@ -8,7 +8,7 @@ import json
 from .const import (
     DOMAIN, CONF_HOST, CONF_PORT, CONF_USERNAME, CONF_PASSWORD,
     CONF_IGNORE_DISKS, CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL,
-    DEFAULT_PORT, CONF_MAC
+    DEFAULT_PORT, CONF_MAC, CONF_UPS_SCAN_INTERVAL, DEFAULT_UPS_SCAN_INTERVAL
 )
 from .disk_manager import DiskManager
 from .system_manager import SystemManager
@@ -199,3 +199,31 @@ class FlynasCoordinator(DataUpdateCoordinator):
         if "system" in self.data:
             self.data["system"]["status"] = "off"
         self.async_update_listeners()
+
+class UPSDataUpdateCoordinator(DataUpdateCoordinator):
+    """专门用于更新UPS数据的协调器"""
+    
+    def __init__(self, hass: HomeAssistant, config, main_coordinator):
+        self.config = config
+        self.main_coordinator = main_coordinator
+        
+        ups_scan_interval = config.get(CONF_UPS_SCAN_INTERVAL, DEFAULT_UPS_SCAN_INTERVAL)
+        update_interval = timedelta(seconds=ups_scan_interval)
+        
+        super().__init__(
+            hass,
+            _LOGGER,
+            name="UPS Data",
+            update_interval=update_interval
+        )
+        
+        self.ups_manager = UPSManager(main_coordinator)
+    
+    async def _async_update_data(self):
+        """获取UPS数据"""
+        _LOGGER.debug("Starting UPS data update...")
+        try:
+            return await self.ups_manager.get_ups_info()
+        except Exception as e:
+            _LOGGER.error("Failed to update UPS data: %s", str(e), exc_info=True)
+            return {}

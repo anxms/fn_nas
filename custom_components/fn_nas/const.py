@@ -15,10 +15,12 @@ CONF_SSH_KEY = "ssh_key"
 CONF_SCAN_INTERVAL = "scan_interval"
 CONF_FAN_CONFIG_PATH = "fan_config_path"
 CONF_IGNORE_DISKS = "ignore_disks"
-CONF_MAC = "mac"  # 添加MAC地址配置
+CONF_MAC = "mac"
+CONF_UPS_SCAN_INTERVAL = "ups_scan_interval"
 
 DEFAULT_PORT = 22
 DEFAULT_SCAN_INTERVAL = 60
+DEFAULT_UPS_SCAN_INTERVAL = 30 
 
 DATA_UPDATE_COORDINATOR = "coordinator"
 
@@ -26,6 +28,7 @@ HDD_TEMP = "temperature"
 HDD_HEALTH = "health"
 SYSTEM_INFO = "system"
 FAN_SPEED = "fan_speed"
+UPS_INFO = "ups_info" 
 
 ATTR_DISK_MODEL = "硬盘型号"
 ATTR_SERIAL_NO = "序列号"
@@ -44,4 +47,4 @@ ICON_RESTART = "mdi:restart"
 
 # 设备标识符常量
 DEVICE_ID_NAS = "flynas_nas_system"
-UPS_INFO = "ups_info"
+DEVICE_ID_UPS = "flynas_ups"  
