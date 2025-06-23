@@ -1,7 +1,7 @@
 {
   "domain": "fn_nas",
   "name": "飞牛NAS",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "documentation": "https://github.com/anxms/fn_nas",
   "dependencies": [],
   "codeowners": ["@anxms"],

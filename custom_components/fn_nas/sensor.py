@@ -69,6 +69,18 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                 "mdi:thermometer",
             )
         )
+
+        # 添加虚拟机状态传感器
+        if "vms" in coordinator.data:
+            for vm in coordinator.data["vms"]:
+                entities.append(
+                    VMStatusSensor(
+                        coordinator, 
+                        vm["name"],
+                        vm.get("title", vm["name"])
+                    )
+                )
+
         # 添加UPS传感器（使用UPS协调器）
         if ups_coordinator.data:  # 检查是否有UPS数据
             ups_data = ups_coordinator.data
@@ -383,3 +395,47 @@ class UPSSensor(CoordinatorEntity, SensorEntity):
             attributes["原始值"] = self.coordinator.data[f"{self.data_key}_str"]
         
         return attributes
+
+class VMStatusSensor(CoordinatorEntity, SensorEntity):
+    """虚拟机状态传感器"""
+    
+    def __init__(self, coordinator, vm_name, vm_title):
+        super().__init__(coordinator)
+        self.vm_name = vm_name
+        self.vm_title = vm_title
+        self._attr_name = f"{vm_title} 状态"
+        self._attr_unique_id = f"flynas_vm_{vm_name}_status"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, f"vm_{vm_name}")},
+            "name": vm_title,
+            "via_device": (DOMAIN, DEVICE_ID_NAS)
+        }
+    
+    @property
+    def native_value(self):
+        """返回虚拟机状态"""
+        for vm in self.coordinator.data.get("vms", []):
+            if vm["name"] == self.vm_name:
+                # 将状态转换为中文
+                state_map = {
+                    "running": "运行中",
+                    "shut off": "已关闭",
+                    "paused": "已暂停",
+                    "rebooting": "重启中",
+                    "crashed": "崩溃"
+                }
+                return state_map.get(vm["state"], vm["state"])
+        return "未知"
+    
+    @property
+    def icon(self):
+        """根据状态返回图标"""
+        for vm in self.coordinator.data.get("vms", []):
+            if vm["name"] == self.vm_name:
+                if vm["state"] == "running":
+                    return "mdi:server"
+                elif vm["state"] == "shut off":
+                    return "mdi:server-off"
+                elif vm["state"] == "rebooting":
+                    return "mdi:server-security"
+        return "mdi:server"

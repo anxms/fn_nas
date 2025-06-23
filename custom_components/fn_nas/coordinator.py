@@ -13,6 +13,7 @@ from .const import (
 from .disk_manager import DiskManager
 from .system_manager import SystemManager
 from .ups_manager import UPSManager
+from .vm_manager import VMManager
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -28,6 +29,8 @@ class FlynasCoordinator(DataUpdateCoordinator):
         self.ssh = None
         self.ssh_closed = True
         self.ups_manager = UPSManager(self)
+        _LOGGER.debug("初始化vm_manager")
+        self.vm_manager = VMManager(self)
         
         scan_interval = config.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
         update_interval = timedelta(seconds=scan_interval)
@@ -158,6 +161,14 @@ class FlynasCoordinator(DataUpdateCoordinator):
             # 获取UPS信息
             ups_info = await self.ups_manager.get_ups_info()
             _LOGGER.debug("UPS info: %s", ups_info)
+
+            # 获取虚拟机信息
+            vms = await self.vm_manager.get_vm_list()
+            # 获取每个虚拟机的标题
+            for vm in vms:
+                vm["title"] = await self.vm_manager.get_vm_title(vm["name"])
+            
+            _LOGGER.debug("Retrieved %d VMs", len(vms))
             
             # 组合所有数据
             data = {
@@ -166,7 +177,8 @@ class FlynasCoordinator(DataUpdateCoordinator):
                     **system,
                     "status": status  # 使用检测到的状态
                 },
-                "ups": ups_info  # 添加UPS信息
+                "ups": ups_info, # 添加UPS信息
+                "vms": vms  # 添加虚拟机数据
             }
             
             # 记录关键信息
@@ -227,3 +239,20 @@ class UPSDataUpdateCoordinator(DataUpdateCoordinator):
         except Exception as e:
             _LOGGER.error("Failed to update UPS data: %s", str(e), exc_info=True)
             return {}
+
+    async def control_vm(self, vm_name, action):
+        """控制虚拟机操作"""
+        try:
+            _LOGGER.debug("控制虚拟机: %s, 操作: %s", vm_name, action)
+            # 确保vm_manager已初始化
+            if not hasattr(self, 'vm_manager'):
+                _LOGGER.warning("vm_manager未初始化，正在创建实例")
+                self.vm_manager = VMManager(self)
+            
+            # 调用vm_manager
+            result = await self.vm_manager.control_vm(vm_name, action)
+            _LOGGER.debug("虚拟机控制结果: %s", result)
+            return result
+        except Exception as e:
+            _LOGGER.error("虚拟机控制失败: %s", str(e), exc_info=True)
+            return False

@@ -1,17 +1,36 @@
 import logging
+from homeassistant.core import callback
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.core import callback
 from .const import DOMAIN, DATA_UPDATE_COORDINATOR, CONF_MAC, DEVICE_ID_NAS
 
 _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
-    coordinator = hass.data[DOMAIN][config_entry.entry_id][DATA_UPDATE_COORDINATOR]
-    async_add_entities([PowerSwitch(coordinator, config_entry)])
+    domain_data = hass.data[DOMAIN][config_entry.entry_id]
+    coordinator = domain_data[DATA_UPDATE_COORDINATOR]
+    
+    entities = []
+    
+    # 添加NAS电源开关
+    entities.append(PowerSwitch(coordinator, config_entry))
+    
+    # 添加虚拟机开关
+    if "vms" in coordinator.data:
+        for vm in coordinator.data["vms"]:
+            entities.append(
+                VMSwitch(
+                    coordinator, 
+                    vm["name"],
+                    vm.get("title", vm["name"])
+                )
+            )
+    
+    async_add_entities(entities)
 
 class PowerSwitch(CoordinatorEntity, SwitchEntity):
+    """NAS电源开关实体"""
     _attr_name = "电源"
     _attr_unique_id = "flynas_power"
     _attr_entity_category = EntityCategory.CONFIG
@@ -54,7 +73,7 @@ class PowerSwitch(CoordinatorEntity, SwitchEntity):
         self.coordinator.async_update_listeners()
         self.async_write_ha_state()
     
-    @callback
+    @callback  # 这里需要callback装饰器
     def _handle_coordinator_update(self) -> None:
         """处理协调器更新"""
         # 获取当前系统状态
@@ -78,3 +97,78 @@ class PowerSwitch(CoordinatorEntity, SwitchEntity):
             "警告": "网络唤醒需要提前配置MAC地址",
             "当前状态": self.coordinator.data["system"].get("status", "未知")
         }
+
+class VMSwitch(CoordinatorEntity, SwitchEntity):
+    """虚拟机电源开关实体"""
+    
+    def __init__(self, coordinator, vm_name, vm_title):
+        super().__init__(coordinator)
+        self.vm_name = vm_name
+        self.vm_title = vm_title
+        self._attr_name = f"{vm_title} 电源"
+        self._attr_unique_id = f"flynas_vm_{vm_name}_switch"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, f"vm_{vm_name}")},
+            "name": vm_title,
+            "via_device": (DOMAIN, DEVICE_ID_NAS)
+        }
+        
+        # 直接获取vm_manager实例
+        self.vm_manager = coordinator.vm_manager if hasattr(coordinator, 'vm_manager') else None
+    
+    @property
+    def is_on(self):
+        """检查虚拟机是否运行"""
+        for vm in self.coordinator.data.get("vms", []):
+            if vm["name"] == self.vm_name:
+                return vm["state"] == "running"
+        return False
+    
+    async def async_turn_on(self, **kwargs):
+        """启动虚拟机"""
+        if not self.vm_manager:
+            _LOGGER.error("vm_manager不可用，无法启动虚拟机 %s", self.vm_name)
+            return
+            
+        try:
+            success = await self.vm_manager.control_vm(self.vm_name, "start")
+            if success:
+                # 更新本地状态
+                for vm in self.coordinator.data.get("vms", []):
+                    if vm["name"] == self.vm_name:
+                        vm["state"] = "running"
+                self.async_write_ha_state()
+            else:
+                _LOGGER.error("无法启动虚拟机 %s", self.vm_name)
+        except Exception as e:
+            _LOGGER.error("启动虚拟机时出错: %s", str(e), exc_info=True)
+    
+    async def async_turn_off(self, **kwargs):
+        """关闭虚拟机"""
+        if not self.vm_manager:
+            _LOGGER.error("vm_manager不可用，无法关闭虚拟机 %s", self.vm_name)
+            return
+            
+        try:
+            success = await self.vm_manager.control_vm(self.vm_name, "shutdown")
+            if success:
+                # 更新本地状态
+                for vm in self.coordinator.data.get("vms", []):
+                    if vm["name"] == self.vm_name:
+                        vm["state"] = "shut off"
+                self.async_write_ha_state()
+            else:
+                _LOGGER.error("无法关闭虚拟机 %s", self.vm_name)
+        except Exception as e:
+            _LOGGER.error("关闭虚拟机时出错: %s", str(e), exc_info=True)
+    
+    @property
+    def extra_state_attributes(self):
+        """返回虚拟机额外属性"""
+        for vm in self.coordinator.data.get("vms", []):
+            if vm["name"] == self.vm_name:
+                return {
+                    "虚拟机ID": vm["id"],
+                    "原始状态": vm["state"]
+                }
+        return {}
