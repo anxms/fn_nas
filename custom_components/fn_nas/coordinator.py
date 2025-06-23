@@ -12,6 +12,7 @@ from .const import (
 )
 from .disk_manager import DiskManager
 from .system_manager import SystemManager
+from .ups_manager import UPSManager
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ class FlynasCoordinator(DataUpdateCoordinator):
         self.mac = config.get(CONF_MAC, "")
         self.ssh = None
         self.ssh_closed = True
+        self.ups_manager = UPSManager(self)
         
         scan_interval = config.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
         update_interval = timedelta(seconds=scan_interval)
@@ -152,6 +154,10 @@ class FlynasCoordinator(DataUpdateCoordinator):
             # 获取系统信息（包括CPU温度、主板温度）
             system = await self.system_manager.get_system_info()
             _LOGGER.debug("System info: %s", system)
+
+            # 获取UPS信息
+            ups_info = await self.ups_manager.get_ups_info()
+            _LOGGER.debug("UPS info: %s", ups_info)
             
             # 组合所有数据
             data = {
@@ -160,6 +166,7 @@ class FlynasCoordinator(DataUpdateCoordinator):
                     **system,
                     "status": status  # 使用检测到的状态
                 },
+                "ups": ups_info  # 添加UPS信息
             }
             
             # 记录关键信息

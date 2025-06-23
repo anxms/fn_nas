@@ -78,6 +78,91 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
             "mdi:thermometer",
         )
     )"""
+
+    # 添加UPS传感器
+    if "ups" in coordinator.data:
+        ups_data = coordinator.data["ups"]
+        
+        from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
+        
+        entities.append(
+            UPSSensor(
+                coordinator,
+                "UPS状态",
+                "ups_status",
+                None,
+                "mdi:power-plug",
+                "status"
+            )
+        )
+        entities.append(
+            UPSSensor(
+                coordinator,
+                "UPS电池电量",
+                "ups_battery",
+                "%",
+                "mdi:battery",
+                "battery_level",
+                device_class=SensorDeviceClass.BATTERY,
+                state_class=SensorStateClass.MEASUREMENT
+            )
+        )
+        entities.append(
+            UPSSensor(
+                coordinator,
+                "UPS剩余时间",
+                "ups_runtime",
+                "分钟",
+                "mdi:clock",
+                "runtime_remaining",
+                state_class=SensorStateClass.MEASUREMENT
+            )
+        )
+        """ entities.append(
+            UPSSensor(
+                coordinator,
+                "UPS输入电压",
+                "ups_input_voltage",
+                "V",
+                "mdi:lightning-bolt",
+                "input_voltage",
+                device_class=SensorDeviceClass.VOLTAGE,
+                state_class=SensorStateClass.MEASUREMENT
+            )
+        ) """
+        entities.append(
+            UPSSensor(
+                coordinator,
+                "UPS输出电压",
+                "ups_output_voltage",
+                "V",
+                "mdi:lightning-bolt-outline",
+                "output_voltage",
+                device_class=SensorDeviceClass.VOLTAGE,
+                state_class=SensorStateClass.MEASUREMENT
+            )
+        )
+        entities.append(
+            UPSSensor(
+                coordinator,
+                "UPS负载",
+                "ups_load",
+                "%",
+                "mdi:gauge",
+                "load_percent",
+                state_class=SensorStateClass.MEASUREMENT
+            )
+        )
+        entities.append(
+            UPSSensor(
+                coordinator,
+                "UPS型号",
+                "ups_model",
+                None,
+                "mdi:information",
+                "model"
+            )
+        )
     
     async_add_entities(entities)
 
@@ -282,3 +367,43 @@ class MoboTempSensor(CoordinatorEntity, SensorEntity):
             except:
                 return None
         return None
+
+class UPSSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator, name, unique_id, unit, icon, data_key, device_class=None, state_class=None):
+        super().__init__(coordinator)
+        self._attr_name = name
+        self._attr_unique_id = unique_id
+        self._attr_native_unit_of_measurement = unit
+        self._attr_icon = icon
+        self.data_key = data_key
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, "flynas_ups")},
+            "name": "飞牛NAS UPS",
+            "manufacturer": "UPS设备",
+            "via_device": (DOMAIN, DEVICE_ID_NAS)
+        }
+        
+        # 设置设备类和状态类（如果提供）
+        if device_class:
+            self._attr_device_class = device_class
+        if state_class:
+            self._attr_state_class = state_class
+    
+    @property
+    def native_value(self):
+        ups_data = self.coordinator.data.get("ups", {})
+        return ups_data.get(self.data_key)
+    
+    @property
+    def extra_state_attributes(self):
+        ups_data = self.coordinator.data.get("ups", {})
+        attributes = {
+            "最后更新时间": ups_data.get("last_update", "未知"),
+            "UPS类型": ups_data.get("ups_type", "未知")
+        }
+        
+        # 添加原始字符串值（如果存在）
+        if f"{self.data_key}_str" in ups_data:
+            attributes["原始值"] = ups_data[f"{self.data_key}_str"]
+        
+        return attributes

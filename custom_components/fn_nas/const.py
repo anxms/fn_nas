@@ -44,3 +44,4 @@ ICON_RESTART = "mdi:restart"
 
 # 设备标识符常量
 DEVICE_ID_NAS = "flynas_nas_system"
+UPS_INFO = "ups_info"

@@ -247,7 +247,7 @@ class SystemManager:
             self.logger.warning("Using fallback CPU temperature detection")
             return f"{avg_temp:.1f} °C"
         
-        self.logger.warning("No CPU temperature found in sensors output")
+        # self.logger.warning("No CPU temperature found in sensors output")
         return "未知"
     
     def extract_mobo_temp(self, sensors_output: str) -> str:
@@ -344,7 +344,7 @@ class SystemManager:
             self.logger.warning("Using fallback motherboard temperature detection")
             return f"{avg_temp:.1f} °C"
         
-        self.logger.warning("No motherboard temperature found in sensors output")
+        # self.logger.warning("No motherboard temperature found in sensors output")
         return "未知"
     
     async def reboot_system(self):
