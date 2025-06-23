@@ -34,15 +34,15 @@ passwd root
 ```shell
 nano /etc/ssh/sshd_config
 ```
-	*   找到并修改：
-    ```shell
+*   找到并修改：
+    ```
 PermitRootLogin yes      # 取消注释并修改
 PasswordAuthentication yes  # 确保已启用
 ```
 5. 保存配置：
-	*   Nano编辑器：`Ctrl+O` → `Enter` → `Ctrl+X`
+*   Nano编辑器：`Ctrl+O` → `Enter` → `Ctrl+X`
 6. 重启SSH服务：
-```shell
+```
 systemctl restart ssh
 ```
 
@@ -51,9 +51,9 @@ systemctl restart ssh
 ```shell
 sensors-detect
 ```
-	*   按提示选择`yes`或`y`
+*   按提示选择`yes`或`y`
 2. 重启NAS：
-```shell
+```
 reboot
 ```
 
