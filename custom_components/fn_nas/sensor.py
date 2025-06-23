@@ -1,5 +1,5 @@
 import logging
-from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
+from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import UnitOfTemperature
 from .const import (
@@ -17,91 +17,113 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     ups_coordinator = domain_data["ups_coordinator"]   # UPS协调器
     
     entities = []
+    existing_ids = set()  # 用于跟踪已创建的实体ID，防止重复添加
     
     # 添加硬盘传感器
     for disk in coordinator.data.get("disks", []):
         # 温度传感器
-        entities.append(
-            DiskSensor(
-                coordinator, 
-                disk["device"], 
-                HDD_TEMP,
-                f"硬盘 {disk.get('model', '未知')} 温度",
-                f"{disk['device']}_temperature",
-                UnitOfTemperature.CELSIUS,
-                ICON_TEMPERATURE,
-                disk
+        temp_uid = f"{config_entry.entry_id}_{disk['device']}_temperature"
+        if temp_uid not in existing_ids:
+            entities.append(
+                DiskSensor(
+                    coordinator, 
+                    disk["device"], 
+                    HDD_TEMP,
+                    f"硬盘 {disk.get('model', '未知')} 温度",
+                    temp_uid,
+                    UnitOfTemperature.CELSIUS,
+                    ICON_TEMPERATURE,
+                    disk
+                )
             )
-        )
+            existing_ids.add(temp_uid)
         
         # 健康状态传感器
-        entities.append(
-            DiskSensor(
-                coordinator, 
-                disk["device"], 
-                HDD_HEALTH,
-                f"硬盘 {disk.get('model', '未知')} 健康状态",
-                f"{disk['device']}_health",
-                None,
-                ICON_HEALTH,
-                disk
+        health_uid = f"{config_entry.entry_id}_{disk['device']}_health"
+        if health_uid not in existing_ids:
+            entities.append(
+                DiskSensor(
+                    coordinator, 
+                    disk["device"], 
+                    HDD_HEALTH,
+                    f"硬盘 {disk.get('model', '未知')} 健康状态",
+                    health_uid,
+                    None,
+                    ICON_HEALTH,
+                    disk
+                )
             )
-        )
+            existing_ids.add(health_uid)
     
-        # 添加系统信息传感器
+    # 添加系统信息传感器
+    system_uid = f"{config_entry.entry_id}_system_status"
+    if system_uid not in existing_ids:
         entities.append(
             SystemSensor(
                 coordinator,
                 "系统状态",
-                "system_status",
+                system_uid,
                 None,
                 "mdi:server",
             )
         )
-        
-        # 添加CPU温度传感器
+        existing_ids.add(system_uid)
+    
+    # 添加CPU温度传感器
+    cpu_temp_uid = f"{config_entry.entry_id}_cpu_temperature"
+    if cpu_temp_uid not in existing_ids:
         entities.append(
             CPUTempSensor(
                 coordinator,
                 "CPU温度",
-                "cpu_temperature",
+                cpu_temp_uid,
                 UnitOfTemperature.CELSIUS,
                 "mdi:thermometer",
             )
         )
+        existing_ids.add(cpu_temp_uid)
+    
+    # 添加主板温度传感器
+    mobo_temp_uid = f"{config_entry.entry_id}_motherboard_temperature"
+    if mobo_temp_uid not in existing_ids:
+        entities.append(
+            MoboTempSensor(
+                coordinator,
+                "主板温度",
+                mobo_temp_uid,
+                UnitOfTemperature.CELSIUS,
+                "mdi:thermometer",
+            )
+        )
+        existing_ids.add(mobo_temp_uid)
 
-        # 添加虚拟机状态传感器
-        if "vms" in coordinator.data:
-            for vm in coordinator.data["vms"]:
+    # 添加虚拟机状态传感器
+    if "vms" in coordinator.data:
+        for vm in coordinator.data["vms"]:
+            vm_uid = f"{config_entry.entry_id}_flynas_vm_{vm['name']}_status"
+            if vm_uid not in existing_ids:
                 entities.append(
                     VMStatusSensor(
                         coordinator, 
                         vm["name"],
-                        vm.get("title", vm["name"])
+                        vm.get("title", vm["name"]),
+                        config_entry.entry_id  # 传递entry_id用于生成唯一ID
                     )
                 )
+                existing_ids.add(vm_uid)
 
-        # 添加UPS传感器（使用UPS协调器）
-        if ups_coordinator.data:  # 检查是否有UPS数据
-            ups_data = ups_coordinator.data
-            
-            from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
-            
-            entities.append(
-                UPSSensor(
-                    ups_coordinator,  # 使用UPS协调器
-                    "UPS状态",
-                    "ups_status",
-                    None,
-                    "mdi:power-plug",
-                    "status"
-                )
-            )
+    # 添加UPS传感器（使用UPS协调器）
+    if ups_coordinator.data:  # 检查是否有UPS数据
+        ups_data = ups_coordinator.data
+        
+        # UPS电池电量传感器
+        ups_battery_uid = f"{config_entry.entry_id}_ups_battery"
+        if ups_battery_uid not in existing_ids:
             entities.append(
                 UPSSensor(
                     ups_coordinator,  # 使用UPS协调器
                     "UPS电池电量",
-                    "ups_battery",
+                    ups_battery_uid,
                     "%",
                     "mdi:battery",
                     "battery_level",
@@ -109,22 +131,32 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                     state_class=SensorStateClass.MEASUREMENT
                 )
             )
+            existing_ids.add(ups_battery_uid)
+        
+        # UPS剩余时间传感器
+        ups_runtime_uid = f"{config_entry.entry_id}_ups_runtime"
+        if ups_runtime_uid not in existing_ids:
             entities.append(
                 UPSSensor(
                     ups_coordinator,  # 使用UPS协调器
                     "UPS剩余时间",
-                    "ups_runtime",
+                    ups_runtime_uid,
                     "分钟",
                     "mdi:clock",
                     "runtime_remaining",
                     state_class=SensorStateClass.MEASUREMENT
                 )
             )
+            existing_ids.add(ups_runtime_uid)
+        
+        # UPS输出电压传感器
+        ups_output_voltage_uid = f"{config_entry.entry_id}_ups_output_voltage"
+        if ups_output_voltage_uid not in existing_ids:
             entities.append(
                 UPSSensor(
                     ups_coordinator,  # 使用UPS协调器
                     "UPS输出电压",
-                    "ups_output_voltage",
+                    ups_output_voltage_uid,
                     "V",
                     "mdi:lightning-bolt-outline",
                     "output_voltage",
@@ -132,29 +164,55 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                     state_class=SensorStateClass.MEASUREMENT
                 )
             )
+            existing_ids.add(ups_output_voltage_uid)
+        
+        # UPS负载传感器
+        ups_load_uid = f"{config_entry.entry_id}_ups_load"
+        if ups_load_uid not in existing_ids:
             entities.append(
                 UPSSensor(
                     ups_coordinator,  # 使用UPS协调器
                     "UPS负载",
-                    "ups_load",
+                    ups_load_uid,
                     "%",
                     "mdi:gauge",
                     "load_percent",
                     state_class=SensorStateClass.MEASUREMENT
                 )
             )
+            existing_ids.add(ups_load_uid)
+        
+        # UPS型号传感器
+        ups_model_uid = f"{config_entry.entry_id}_ups_model"
+        if ups_model_uid not in existing_ids:
             entities.append(
                 UPSSensor(
                     ups_coordinator,  # 使用UPS协调器
                     "UPS型号",
-                    "ups_model",
+                    ups_model_uid,
                     None,
                     "mdi:information",
                     "model"
                 )
             )
+            existing_ids.add(ups_model_uid)
         
-        async_add_entities(entities)
+        # UPS状态传感器
+        ups_status_uid = f"{config_entry.entry_id}_ups_status"
+        if ups_status_uid not in existing_ids:
+            entities.append(
+                UPSSensor(
+                    ups_coordinator,  # 使用UPS协调器
+                    "UPS状态",
+                    ups_status_uid,
+                    None,
+                    "mdi:power-plug",
+                    "status"
+                )
+            )
+            existing_ids.add(ups_status_uid)
+    
+    async_add_entities(entities)
 
 class DiskSensor(CoordinatorEntity, SensorEntity):
     def __init__(self, coordinator, device_id, sensor_type, name, unique_id, unit, icon, disk_info):
@@ -399,12 +457,12 @@ class UPSSensor(CoordinatorEntity, SensorEntity):
 class VMStatusSensor(CoordinatorEntity, SensorEntity):
     """虚拟机状态传感器"""
     
-    def __init__(self, coordinator, vm_name, vm_title):
+    def __init__(self, coordinator, vm_name, vm_title, entry_id):
         super().__init__(coordinator)
         self.vm_name = vm_name
         self.vm_title = vm_title
         self._attr_name = f"{vm_title} 状态"
-        self._attr_unique_id = f"flynas_vm_{vm_name}_status"
+        self._attr_unique_id = f"{entry_id}_flynas_vm_{vm_name}_status"  # 使用entry_id确保唯一性
         self._attr_device_info = {
             "identifiers": {(DOMAIN, f"vm_{vm_name}")},
             "name": vm_title,

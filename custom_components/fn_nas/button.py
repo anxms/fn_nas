@@ -13,7 +13,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     entities = []
     
     # 1. 添加NAS重启按钮
-    entities.append(RebootButton(coordinator))
+    entities.append(RebootButton(coordinator, config_entry.entry_id))
     
     # 2. 添加虚拟机重启按钮
     if "vms" in coordinator.data:
@@ -22,19 +22,19 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                 VMRebootButton(
                     coordinator, 
                     vm["name"],
-                    vm.get("title", vm["name"])
+                    vm.get("title", vm["name"]),
+                    config_entry.entry_id  # 传递entry_id用于生成唯一ID
                 )
             )
     
     async_add_entities(entities)
 
 class RebootButton(CoordinatorEntity, ButtonEntity):
-    _attr_name = "重启"
-    _attr_unique_id = "flynas_reboot"
-    _attr_entity_category = EntityCategory.CONFIG
-    
-    def __init__(self, coordinator):
+    def __init__(self, coordinator, entry_id):
         super().__init__(coordinator)
+        self._attr_name = "重启"
+        self._attr_unique_id = f"{entry_id}_flynas_reboot"  # 使用entry_id确保唯一性
+        self._attr_entity_category = EntityCategory.CONFIG
         self._attr_device_info = {
             "identifiers": {(DOMAIN, DEVICE_ID_NAS)},
             "name": "飞牛NAS系统",
@@ -53,12 +53,12 @@ class RebootButton(CoordinatorEntity, ButtonEntity):
         }
 
 class VMRebootButton(CoordinatorEntity, ButtonEntity):
-    def __init__(self, coordinator, vm_name, vm_title):
+    def __init__(self, coordinator, vm_name, vm_title, entry_id):
         super().__init__(coordinator)
         self.vm_name = vm_name
         self.vm_title = vm_title
         self._attr_name = f"{vm_title} 重启"
-        self._attr_unique_id = f"flynas_vm_{vm_name}_reboot"
+        self._attr_unique_id = f"{entry_id}_flynas_vm_{vm_name}_reboot"  # 使用entry_id确保唯一性
         self._attr_device_info = {
             "identifiers": {(DOMAIN, f"vm_{vm_name}")},
             "name": vm_title,
@@ -74,7 +74,6 @@ class VMRebootButton(CoordinatorEntity, ButtonEntity):
             return
             
         try:
-
             success = await self.vm_manager.control_vm(self.vm_name, "reboot")
             if success:
                 # 更新状态为"重启中"
