@@ -16,7 +16,7 @@ class SystemManager:
         self.sensors_debug_path = "/config/fn_nas_debug"  # 调试文件保存路径
     
     async def get_system_info(self) -> dict:
-        """获取系统信息（修复版）"""
+        """获取系统信息"""
         system_info = {}
         try:
             # 获取原始运行时间（秒数）
@@ -154,7 +154,7 @@ class SystemManager:
             return "未知"
     
     def extract_cpu_temp(self, sensors_output: str) -> str:
-        """从 sensors 输出中提取 CPU 温度（优化版）"""
+        """从 sensors 输出中提取 CPU 温度"""
         # 首先尝试解析JSON格式
         if sensors_output.strip().startswith('{'):
             try:
@@ -184,10 +184,44 @@ class SystemManager:
                 self.logger.warning("Failed to parse sensors JSON: %s", str(e))
         
         # 如果JSON解析失败，使用正则表达式
-        temp_values = []
-        patterns = [
-            r'Package id 0:\s*\+?(\d+\.?\d*)°C',
+        # 优先匹配 Package id 0 的值
+        package_id_pattern = r'Package id 0:\s*\+?(\d+\.?\d*)°C'
+        package_match = re.search(package_id_pattern, sensors_output, re.IGNORECASE)
+        if package_match:
+            try:
+                package_temp = float(package_match.group(1))
+                self.logger.debug("Found Package id 0 temperature: %.1f°C", package_temp)
+                return f"{package_temp:.1f} °C"
+            except (ValueError, IndexError) as e:
+                self.logger.debug("Package id 0 match error: %s", str(e))
+        
+        # 如果找不到 Package id 0，尝试匹配核心温度
+        core_patterns = [
             r'Core\s*\d+:\s*\+?(\d+\.?\d*)°C',
+            r'Core \d+:\s*\+?(\d+\.?\d*)°C',
+            r'CPU\d+_TEMP:\s*\+?(\d+\.?\d*)°C'
+        ]
+        
+        core_temps = []
+        for pattern in core_patterns:
+            matches = re.finditer(pattern, sensors_output, re.IGNORECASE)
+            for match in matches:
+                try:
+                    temp = float(match.group(1))
+                    core_temps.append(temp)
+                    self.logger.debug("Found core temperature with pattern: %s: %.1f°C", pattern, temp)
+                except (ValueError, IndexError) as e:
+                    self.logger.debug("Core pattern match error: %s", str(e))
+        
+        # 如果有核心温度值，取平均值
+        if core_temps:
+            avg_temp = sum(core_temps) / len(core_temps)
+            self.logger.debug("Using average core temperature: %.1f°C", avg_temp)
+            return f"{avg_temp:.1f} °C"
+        
+        # 如果找不到核心温度，尝试其他模式
+        other_patterns = [
+            r'Package id 0:\s*\+?(\d+\.?\d*)°C',
             r'CPU Temperature:\s*\+?(\d+\.?\d*)°C',
             r'cpu_thermal:\s*\+?(\d+\.?\d*)°C',
             r'Tdie:\s*\+?(\d+\.?\d*)°C',
@@ -203,8 +237,9 @@ class SystemManager:
             r'Physical id 0:\s*\+?(\d+\.?\d*)°C'
         ]
         
+        temp_values = []
         found_any = False
-        for pattern in patterns:
+        for pattern in other_patterns:
             matches = re.finditer(pattern, sensors_output, re.IGNORECASE)
             for match in matches:
                 try:
@@ -249,9 +284,24 @@ class SystemManager:
         
         # self.logger.warning("No CPU temperature found in sensors output")
         return "未知"
+
+    def extract_temp_from_systin(self, systin_data: dict) -> float:
+        """从 SYSTIN 数据结构中提取温度值"""
+        if not systin_data:
+            return None
+            
+        # 尝试从不同键名获取温度值
+        for key in ["temp1_input", "input", "value"]:
+            temp = systin_data.get(key)
+            if temp is not None:
+                try:
+                    return float(temp)
+                except (TypeError, ValueError):
+                    continue
+        return None
     
     def extract_mobo_temp(self, sensors_output: str) -> str:
-        """从 sensors 输出中提取主板温度（优化版）"""
+        """从 sensors 输出中提取主板温度"""
         # 首先尝试解析JSON格式
         if sensors_output.strip().startswith('{'):
             try:
@@ -260,7 +310,13 @@ class SystemManager:
                 # 查找包含主板相关键名的温度值
                 candidates = []
                 for key, values in data.items():
-                    if any(kw in key.lower() for kw in ["system", "motherboard", "mb", "board", "pch", "chipset", "sys", "baseboard"]):
+                    # 优先检查 SYSTIN 键
+                    if "systin" in key.lower():
+                        temp = self.extract_temp_from_systin(values)
+                        if temp is not None:
+                            return f"{temp:.1f} °C"
+                    
+                    if any(kw in key.lower() for kw in ["system", "motherboard", "mb", "board", "pch", "chipset", "sys", "baseboard", "systin"]):
                         for subkey, temp_value in values.items():
                             if any(kw in subkey.lower() for kw in ["temp", "input"]) and not "crit" in subkey.lower():
                                 try:
@@ -274,13 +330,47 @@ class SystemManager:
                 if candidates:
                     avg_temp = sum(candidates) / len(candidates)
                     return f"{avg_temp:.1f} °C"
+                    
+                # 新增：尝试直接获取 SYSTIN 的温度值
+                systin_temp = self.extract_temp_from_systin(data.get("nct6798-isa-02a0", {}).get("SYSTIN", {}))
+                if systin_temp is not None:
+                    return f"{systin_temp:.1f} °C"
+                    
             except Exception as e:
                 self.logger.warning("Failed to parse sensors JSON: %s", str(e))
         
-        # 如果JSON解析失败，使用正则表达式
-        temp_values = []
-        patterns = [
-            r'SYSTIN:\s*\+?(\d+\.?\d*)°C',
+        # 改进SYSTIN提取逻辑
+        systin_patterns = [
+            r'SYSTIN:\s*[+\-]?\s*(\d+\.?\d*)\s*°C',  # 标准格式
+            r'SYSTIN[:\s]+[+\-]?\s*(\d+\.?\d*)\s*°C',  # 兼容无冒号或多余空格
+            r'System Temp:\s*[+\-]?\s*(\d+\.?\d*)\s*°C'  # 备选方案
+        ]
+        
+        for pattern in systin_patterns:
+            systin_match = re.search(pattern, sensors_output, re.IGNORECASE)
+            if systin_match:
+                try:
+                    temp = float(systin_match.group(1))
+                    self.logger.debug("Found SYSTIN temperature: %.1f°C", temp)
+                    return f"{temp:.1f} °C"
+                except (ValueError, IndexError) as e:
+                    self.logger.debug("SYSTIN match error: %s", str(e))
+                    continue
+        for line in sensors_output.splitlines():
+            if 'SYSTIN' in line or 'System Temp' in line:
+                # 改进的温度值提取正则
+                match = re.search(r'[+\-]?\s*(\d+\.?\d*)\s*°C', line)
+                if match:
+                    try:
+                        temp = float(match.group(1))
+                        self.logger.debug("Found mobo temp in line: %s: %.1f°C", line.strip(), temp)
+                        return f"{temp:.1f} °C"
+                    except ValueError:
+                        continue
+        
+        
+        # 如果找不到SYSTIN，尝试其他主板温度模式
+        other_patterns = [
             r'System Temp:\s*\+?(\d+\.?\d*)°C',
             r'MB Temperature:\s*\+?(\d+\.?\d*)°C',
             r'Motherboard:\s*\+?(\d+\.?\d*)°C',
@@ -289,22 +379,17 @@ class SystemManager:
             r'PCH_Temp:\s*\+?(\d+\.?\d*)°C',
             r'Chipset:\s*\+?(\d+\.?\d*)°C',
             r'Baseboard Temp:\s*\+?(\d+\.?\d*)°C',
-            r'asusec-isa-\S+:\s*\+?(\d+\.?\d*)°C',  # 华硕主板
-            r'Tmotherboard:\s*\+?(\d+\.?\d*)°C',
-            r'Temp2:\s*\+?(\d+\.?\d*)°C',  # 通用传感器
             r'System Temperature:\s*\+?(\d+\.?\d*)°C',
-            r'MB_CPU_TEMP:\s*\+?(\d+\.?\d*)°C',
             r'Mainboard Temp:\s*\+?(\d+\.?\d*)°C'
         ]
         
-        found_any = False
-        for pattern in patterns:
+        temp_values = []
+        for pattern in other_patterns:
             matches = re.finditer(pattern, sensors_output, re.IGNORECASE)
             for match in matches:
                 try:
                     temp = float(match.group(1))
                     temp_values.append(temp)
-                    found_any = True
                     self.logger.debug("Found motherboard temperature with pattern: %s: %.1f°C", pattern, temp)
                 except (ValueError, IndexError):
                     continue
@@ -314,16 +399,16 @@ class SystemManager:
             avg_temp = sum(temp_values) / len(temp_values)
             return f"{avg_temp:.1f} °C"
         
-        # 如果所有模式都失败，尝试手动扫描所有温度值
+        # 最后，尝试手动扫描所有温度值
         fallback_candidates = []
         for line in sensors_output.splitlines():
             if '°C' in line:
                 # 跳过CPU相关的行
-                if any(kw in line.lower() for kw in ["core", "cpu", "package", "tccd", "k10temp", "processor", "amd", "intel"]):
+                if any(kw in line.lower() for kw in ["core", "cpu", "package", "tccd", "k10temp", "processor", "amd", "intel", "nvme"]):
                     continue
                     
                 # 跳过风扇和电压行
-                if any(kw in line.lower() for kw in ["fan", "volt", "vin", "+3.3", "+5", "+12", "vdd"]):
+                if any(kw in line.lower() for kw in ["fan", "volt", "vin", "+3.3", "+5", "+12", "vdd", "power", "crit", "max", "min"]):
                     continue
                     
                 # 查找温度值
@@ -346,6 +431,8 @@ class SystemManager:
         
         # self.logger.warning("No motherboard temperature found in sensors output")
         return "未知"
+
+        
     
     async def reboot_system(self):
         """重启系统"""

@@ -397,24 +397,33 @@ class MoboTempSensor(CoordinatorEntity, SensorEntity):
         system_data = self.coordinator.data.get("system", {})
         temp_str = system_data.get("motherboard_temperature", "未知")
         
-        # 如果系统离线，显示空值
+        # 系统离线时返回空值
         if system_data.get("status") == "off":
             return None
         
-        # 处理未知温度值
+        # 处理未知值
         if temp_str is None or temp_str == "未知":
             return None
         
-        # 提取温度数值
+        # 数值类型直接返回
         if isinstance(temp_str, (int, float)):
             return temp_str
             
-        if "°C" in temp_str:
-            try:
-                return float(temp_str.replace("°C", "").strip())
-            except:
-                return None
-        return None
+        # 增强字符串解析逻辑
+        try:
+            # 移除温度单位标识（支持多种格式）
+            cleaned = temp_str.lower().replace('°c', '').replace('c', '').strip()
+            
+            # 尝试转换为浮点数
+            return float(cleaned)
+        except (ValueError, TypeError) as e:
+            # 记录详细错误信息
+            _LOGGER.warning(
+                "主板温度解析失败: 原始值='%s', 错误: %s",
+                temp_str,
+                str(e)
+            )
+            return None
 
 class UPSSensor(CoordinatorEntity, SensorEntity):
     def __init__(self, coordinator, name, unique_id, unit, icon, data_key, device_class=None, state_class=None):
