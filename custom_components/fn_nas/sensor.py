@@ -3,7 +3,7 @@ from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, Sen
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import UnitOfTemperature
 from .const import (
-    DOMAIN, HDD_TEMP, HDD_HEALTH, SYSTEM_INFO, ICON_DISK, 
+    DOMAIN, HDD_TEMP, HDD_HEALTH, HDD_STATUS, SYSTEM_INFO, ICON_DISK, 
     ICON_TEMPERATURE, ICON_HEALTH, ATTR_DISK_MODEL, ATTR_SERIAL_NO,
     ATTR_POWER_ON_HOURS, ATTR_TOTAL_CAPACITY, ATTR_HEALTH_STATUS,
     DEVICE_ID_NAS, DATA_UPDATE_COORDINATOR
@@ -54,6 +54,23 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                 )
             )
             existing_ids.add(health_uid)
+        
+        # 硬盘状态传感器
+        status_uid = f"{config_entry.entry_id}_{disk['device']}_status"
+        if status_uid not in existing_ids:
+            entities.append(
+                DiskSensor(
+                    coordinator, 
+                    disk["device"], 
+                    HDD_STATUS,
+                    f"硬盘 {disk.get('model', '未知')} 状态",
+                    status_uid,
+                    None,
+                    ICON_DISK,
+                    disk
+                )
+            )
+            existing_ids.add(status_uid)
     
     # 添加系统信息传感器
     system_uid = f"{config_entry.entry_id}_system_status"
@@ -239,7 +256,7 @@ class DiskSensor(CoordinatorEntity, SensorEntity):
                     temp = disk.get("temperature")
                     
                     # 处理未知温度值 - 返回None而不是字符串
-                    if temp is None or temp == "未知":
+                    if temp is None or temp == "未知" or temp == "未检测":
                         return None
                         
                     # 如果是字符串，尝试提取数字部分
@@ -259,8 +276,14 @@ class DiskSensor(CoordinatorEntity, SensorEntity):
                     
                 elif self.sensor_type == HDD_HEALTH:
                     health = disk.get("health", "未知")
-                    # 健康状态可以是字符串
+                    # 处理未检测状态
+                    if health == "未检测":
+                        return "未检测"
                     return health if health != "未知" else "未知状态"
+                
+                elif self.sensor_type == HDD_STATUS:
+                    # 返回硬盘状态（活动中、空闲中、休眠中、未知）
+                    return disk.get("status", "未知")
                     
         # 如果找不到磁盘信息，返回None
         return None
@@ -279,7 +302,8 @@ class DiskSensor(CoordinatorEntity, SensorEntity):
             ATTR_POWER_ON_HOURS: self.disk_info.get("power_on_hours", "未知"),
             ATTR_TOTAL_CAPACITY: self.disk_info.get("capacity", "未知"),
             ATTR_HEALTH_STATUS: self.disk_info.get("health", "未知"),
-            "设备ID": self.device_id
+            "设备ID": self.device_id,
+            "状态": self.disk_info.get("status", "未知")
         }
 
 class SystemSensor(CoordinatorEntity, SensorEntity):

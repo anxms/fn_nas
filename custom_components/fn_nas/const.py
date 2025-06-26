@@ -26,6 +26,7 @@ DATA_UPDATE_COORDINATOR = "coordinator"
 
 HDD_TEMP = "temperature"
 HDD_HEALTH = "health"
+HDD_STATUS = "status"
 SYSTEM_INFO = "system"
 FAN_SPEED = "fan_speed"
 UPS_INFO = "ups_info" 

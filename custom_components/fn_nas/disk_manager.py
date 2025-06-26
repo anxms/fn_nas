@@ -9,6 +9,8 @@ class DiskManager:
         self.coordinator = coordinator
         self.logger = _LOGGER.getChild("disk_manager")
         self.logger.setLevel(logging.DEBUG)
+        self.disk_status_cache = {}  # 缓存磁盘状态 {"sda": "活动中", ...}
+        self.first_run = True  # 首次运行标志
     
     def extract_value(self, text: str, patterns, default="未知", format_func=None):
         if not text:
@@ -29,6 +31,37 @@ class DiskManager:
         
         self.logger.debug("No match found for patterns: %s", patterns)
         return default
+    
+    async def get_disk_activity(self, device: str) -> str:
+        """检测硬盘活动状态和休眠状态"""
+        try:
+            # 检查硬盘是否处于休眠状态
+            state_path = f"/sys/block/{device}/device/state"
+            state_output = await self.coordinator.run_command(f"cat {state_path} 2>/dev/null || echo 'unknown'")
+            state = state_output.strip().lower()
+            
+            if state in ["standby", "sleep"]:
+                return "休眠中"
+            
+            # 检查最近一分钟内的硬盘活动
+            stat_path = f"/sys/block/{device}/stat"
+            stat_output = await self.coordinator.run_command(f"cat {stat_path}")
+            stats = stat_output.split()
+            
+            if len(stats) >= 11:
+                # 第9个字段是最近完成的读操作数
+                # 第10个字段是最近完成的写操作数
+                recent_reads = int(stats[8])
+                recent_writes = int(stats[9])
+                
+                if recent_reads > 0 or recent_writes > 0:
+                    return "活动中"
+            
+            return "空闲中"
+            
+        except Exception as e:
+            self.logger.error(f"获取硬盘 {device} 状态失败: {str(e)}", exc_info=True)
+            return "未知"
     
     async def get_disks_info(self) -> list[dict]:
         disks = []
@@ -63,218 +96,250 @@ class DiskManager:
                 disk_info = {"device": device}
                 self.logger.debug("Processing disk: %s", device)
                 
-                try:
-                    info_output = await self.coordinator.run_command(f"smartctl -i {device_path}")
-                    self.logger.debug("smartctl -i output for %s: %s", device, info_output[:200] + "..." if len(info_output) > 200 else info_output)
-                    
-                    # 模型
-                    disk_info["model"] = self.extract_value(
-                        info_output, 
-                        [
-                            r"Device Model:\s*(.+)",
-                            r"Model(?: Family)?\s*:\s*(.+)",
-                            r"Model\s*Number:\s*(.+)"
-                        ]
-                    )
-                    
-                    # 序列号
-                    disk_info["serial"] = self.extract_value(
-                        info_output, 
-                        r"Serial Number\s*:\s*(.+)"
-                    )
-                    
-                    # 容量
-                    disk_info["capacity"] = self.extract_value(
-                        info_output, 
-                        r"User Capacity:\s*([^[]+)"
-                    )
-                    
-                    # 健康状态
-                    health_output = await self.coordinator.run_command(f"smartctl -H {device_path}")
-                    raw_health = self.extract_value(
-                        health_output,
-                        [
-                            r"SMART overall-health self-assessment test result:\s*(.+)",
-                            r"SMART Health Status:\s*(.+)"
-                        ],
-                        default="UNKNOWN"
-                    )
-
-                    # 添加健康状态中英文映射
-                    health_map = {
-                        "PASSED": "良好",
-                        "PASS": "良好",
-                        "OK": "良好",
-                        "GOOD": "良好",
-                        "FAILED": "故障",
-                        "FAIL": "故障",
-                        "ERROR": "错误",
-                        "WARNING": "警告",
-                        "CRITICAL": "严重",
-                        "UNKNOWN": "未知",
-                        "NOT AVAILABLE": "不可用"
-                    }
-
-                    # 转换为中文（不区分大小写）
-                    disk_info["health"] = health_map.get(raw_health.strip().upper(), "未知")
-                    
-                    # 获取详细数据
-                    data_output = await self.coordinator.run_command(f"smartctl -A {device_path}")
-                    self.logger.debug("smartctl -A output for %s: %s", device, data_output[:200] + "..." if len(data_output) > 200 else data_output)
-                    
-                    # 智能温度检测逻辑 - 处理多温度属性
-                    temp_patterns = [
-                        # 新增的NVMe专用模式
-                        r"Temperature:\s*(\d+)\s*Celsius",  # 匹配 NVMe 格式
-                        r"Composite:\s*\+?(\d+\.?\d*)°C",    # 匹配 NVMe 复合温度
-                        # 优先匹配属性194行（通常包含当前温度）
-                        r"194\s+Temperature_Celsius\s+.*?(\d+)\s*(?:$|$)",
+                # 获取硬盘状态（首次运行使用缓存，非首次运行检测）
+                if self.first_run:
+                    # 首次运行时使用缓存状态（首次没有缓存，所以需要检测）
+                    status = await self.get_disk_activity(device)
+                else:
+                    # 非首次运行使用缓存状态
+                    status = self.disk_status_cache.get(device, "未知")
+                
+                disk_info["status"] = status
+                
+                # 更新状态缓存
+                self.disk_status_cache[device] = status
+                
+                # 只有活动状态或首次运行时进行健康检测
+                if status == "活动中" or self.first_run:
+                    try:
+                        info_output = await self.coordinator.run_command(f"smartctl -i {device_path}")
+                        self.logger.debug("smartctl -i output for %s: %s", device, info_output[:200] + "..." if len(info_output) > 200 else info_output)
                         
-                        # 匹配其他温度属性
-                        r"\bTemperature_Celsius\b.*?(\d+)\b",
-                        r"Current Temperature:\s*(\d+)",
-                        r"Airflow_Temperature_Cel\b.*?(\d+)\b",
-                        r"Temp\s*[=:]\s*(\d+)"
-                    ]
-                    
-                    # 查找所有温度值
-                    temperatures = []
-                    for pattern in temp_patterns:
-                        matches = re.findall(pattern, data_output, re.IGNORECASE | re.MULTILINE)
-                        if matches:
-                            for match in matches:
-                                try:
-                                    temperatures.append(int(match))
-                                except ValueError:
-                                    pass
-                    
-                    # 优先选择属性194的温度值，如果没有则选择最大值
-                    if temperatures:
-                        # 优先选择属性194的值（如果存在）
-                        primary_match = re.search(r"194\s+Temperature_Celsius\s+.*?(\d+)\s*(?:\(|$)", 
-                                                 data_output, re.IGNORECASE | re.MULTILINE)
-                        if primary_match:
-                            disk_info["temperature"] = f"{primary_match.group(1)} °C"
+                        # 模型
+                        disk_info["model"] = self.extract_value(
+                            info_output, 
+                            [
+                                r"Device Model:\s*(.+)",
+                                r"Model(?: Family)?\s*:\s*(.+)",
+                                r"Model\s*Number:\s*(.+)"
+                            ]
+                        )
+                        
+                        # 序列号
+                        disk_info["serial"] = self.extract_value(
+                            info_output, 
+                            r"Serial Number\s*:\s*(.+)"
+                        )
+                        
+                        # 容量
+                        disk_info["capacity"] = self.extract_value(
+                            info_output, 
+                            r"User Capacity:\s*([^[]+)"
+                        )
+                        
+                        # 健康状态
+                        health_output = await self.coordinator.run_command(f"smartctl -H {device_path}")
+                        raw_health = self.extract_value(
+                            health_output,
+                            [
+                                r"SMART overall-health self-assessment test result:\s*(.+)",
+                                r"SMART Health Status:\s*(.+)"
+                            ],
+                            default="UNKNOWN"
+                        )
+
+                        # 健康状态中英文映射
+                        health_map = {
+                            "PASSED": "良好",
+                            "PASS": "良好",
+                            "OK": "良好",
+                            "GOOD": "良好",
+                            "FAILED": "故障",
+                            "FAIL": "故障",
+                            "ERROR": "错误",
+                            "WARNING": "警告",
+                            "CRITICAL": "严重",
+                            "UNKNOWN": "未知",
+                            "NOT AVAILABLE": "不可用"
+                        }
+
+                        # 转换为中文（不区分大小写）
+                        disk_info["health"] = health_map.get(raw_health.strip().upper(), "未知")
+                        
+                        # 获取详细数据
+                        data_output = await self.coordinator.run_command(f"smartctl -A {device_path}")
+                        self.logger.debug("smartctl -A output for %s: %s", device, data_output[:200] + "..." if len(data_output) > 200 else data_output)
+                        
+                        # 智能温度检测逻辑 - 处理多温度属性
+                        temp_patterns = [
+                            # 新增的NVMe专用模式
+                            r"Temperature:\s*(\d+)\s*Celsius",  # 匹配 NVMe 格式
+                            r"Composite:\s*\+?(\d+\.?\d*)°C",    # 匹配 NVMe 复合温度
+                            # 优先匹配属性194行（通常包含当前温度）
+                            r"194\s+Temperature_Celsius\s+.*?(\d+)\s*(?:$|$)",
+                            
+                            # 匹配其他温度属性
+                            r"\bTemperature_Celsius\b.*?(\d+)\b",
+                            r"Current Temperature:\s*(\d+)",
+                            r"Airflow_Temperature_Cel\b.*?(\d+)\b",
+                            r"Temp\s*[=:]\s*(\d+)"
+                        ]
+                        
+                        # 查找所有温度值
+                        temperatures = []
+                        for pattern in temp_patterns:
+                            matches = re.findall(pattern, data_output, re.IGNORECASE | re.MULTILINE)
+                            if matches:
+                                for match in matches:
+                                    try:
+                                        temperatures.append(int(match))
+                                    except ValueError:
+                                        pass
+                        
+                        # 优先选择属性194的温度值，如果没有则选择最大值
+                        if temperatures:
+                            # 优先选择属性194的值（如果存在）
+                            primary_match = re.search(r"194\s+Temperature_Celsius\s+.*?(\d+)\s*(?:\(|$)", 
+                                                    data_output, re.IGNORECASE | re.MULTILINE)
+                            if primary_match:
+                                disk_info["temperature"] = f"{primary_match.group(1)} °C"
+                            else:
+                                # 选择最高温度值（通常是当前温度）
+                                disk_info["temperature"] = f"{max(temperatures)} °C"
                         else:
-                            # 选择最高温度值（通常是当前温度）
-                            disk_info["temperature"] = f"{max(temperatures)} °C"
-                    else:
-                        disk_info["temperature"] = "未知"
-                    
-                    # 改进的通电时间检测逻辑 - 处理特殊格式
-                    power_on_hours = "未知"
-                    
-                    # 方法1：提取属性9的RAW_VALUE（处理特殊格式）
-                    attr9_match = re.search(
-                        r"^\s*9\s+Power_On_Hours\b[^\n]+\s+(\d+)h(?:\+(\d+)m(?:\+(\d+)\.\d+s)?)?",
-                        data_output, re.IGNORECASE | re.MULTILINE
-                    )
-                    if attr9_match:
-                        try:
-                            hours = int(attr9_match.group(1))
-                            # 如果有分钟部分，转换为小时的小数部分
-                            if attr9_match.group(2):
-                                minutes = int(attr9_match.group(2))
-                                hours += minutes / 60
-                            power_on_hours = f"{hours:.1f} 小时"
-                            self.logger.debug("Found power_on_hours via method1: %s", power_on_hours)
-                        except:
-                            pass
-                    
-                    # 方法2：如果方法1失败，尝试提取纯数字格式
-                    if power_on_hours == "未知":
+                            disk_info["temperature"] = "未知"
+                        
+                        # 改进的通电时间检测逻辑 - 处理特殊格式
+                        power_on_hours = "未知"
+                        
+                        # 方法1：提取属性9的RAW_VALUE（处理特殊格式）
                         attr9_match = re.search(
-                            r"^\s*9\s+Power_On_Hours\b[^\n]+\s+(\d+)\s*$",
+                            r"^\s*9\s+Power_On_Hours\b[^\n]+\s+(\d+)h(?:\+(\d+)m(?:\+(\d+)\.\d+s)?)?",
                             data_output, re.IGNORECASE | re.MULTILINE
                         )
                         if attr9_match:
                             try:
-                                power_on_hours = f"{int(attr9_match.group(1))} 小时"
-                                self.logger.debug("Found power_on_hours via method2: %s", power_on_hours)
+                                hours = int(attr9_match.group(1))
+                                # 如果有分钟部分，转换为小时的小数部分
+                                if attr9_match.group(2):
+                                    minutes = int(attr9_match.group(2))
+                                    hours += minutes / 60
+                                power_on_hours = f"{hours:.1f} 小时"
+                                self.logger.debug("Found power_on_hours via method1: %s", power_on_hours)
                             except:
                                 pass
-                    
-                    # 方法3：如果前两种方法失败，使用原来的多模式匹配
-                    if power_on_hours == "未知":
-                        power_on_hours = self.extract_value(
-                            data_output,
-                            [
-                                # 精确匹配属性9行
+                        
+                        # 方法2：如果方法1失败，尝试提取纯数字格式
+                        if power_on_hours == "未知":
+                            attr9_match = re.search(
                                 r"^\s*9\s+Power_On_Hours\b[^\n]+\s+(\d+)\s*$",
-                                
-                                # 通用匹配模式
-                                r"9\s+Power_On_Hours\b.*?(\d+)\b",
-                                r"Power_On_Hours\b.*?(\d+)\b",
-                                r"Power On Hours\s+(\d+)",
-                                r"Power on time\s*:\s*(\d+)\s*hours"
-                            ],
-                            default="未知",
-                            format_func=lambda x: f"{int(x)} 小时"
-                        )
-                        if power_on_hours != "未知":
-                            self.logger.debug("Found power_on_hours via method3: %s", power_on_hours)
-                    
-                    # 方法4：如果还没找到，尝试扫描整个属性表
-                    if power_on_hours == "未知":
-                        for line in data_output.split('\n'):
-                            if "Power_On_Hours" in line:
-                                # 尝试提取特殊格式
-                                match = re.search(r"(\d+)h(?:\+(\d+)m(?:\+(\d+)\.\d+s)?)?", line)
-                                if match:
-                                    try:
-                                        hours = int(match.group(1))
-                                        if match.group(2):
-                                            minutes = int(match.group(2))
-                                            hours += minutes / 60
-                                        power_on_hours = f"{hours:.1f} 小时"
-                                        self.logger.debug("Found power_on_hours via method4 (special format): %s", power_on_hours)
-                                        break
-                                    except:
-                                        pass
-                                
-                                # 尝试提取纯数字
-                                fields = line.split()
-                                if fields and fields[-1].isdigit():
-                                    try:
-                                        power_on_hours = f"{int(fields[-1])} 小时"
-                                        self.logger.debug("Found power_on_hours via method4 (numeric): %s", power_on_hours)
-                                        break
-                                    except:
-                                        pass
-                    
-                    disk_info["power_on_hours"] = power_on_hours
-                    
-                    # 添加额外属性：温度历史记录
-                    temp_history = {}
-                    # 提取属性194的温度历史
-                    temp194_match = re.search(r"194\s+Temperature_Celsius\s+.*?\(\s*([\d\s]+)$", data_output)
-                    if temp194_match:
-                        try:
-                            values = [int(x) for x in temp194_match.group(1).split()]
-                            if len(values) >= 4:
-                                temp_history = {
-                                    "最低温度": f"{values[0]} °C",
-                                    "最高温度": f"{values[1]} °C",
-                                    "当前温度": f"{values[2]} °C",
-                                    "阈值": f"{values[3]} °C" if len(values) > 3 else "N/A"
-                                }
-                        except:
-                            pass
-                    
-                    # 保存额外属性
-                    disk_info["attributes"] = temp_history
-                    
-                    disks.append(disk_info)
-                    self.logger.debug("Processed disk %s: %s", device, disk_info)
-                    
-                except Exception as e:
-                    self.logger.warning("Failed to get disk info for %s: %s", device, str(e), exc_info=True)
-                    disk_info["health"] = "查询失败"
-                    disk_info["temperature"] = "未知"
-                    disk_info["power_on_hours"] = "未知"
-                    disks.append(disk_info)
-                    self.logger.debug("Added fallback disk info for %s", device)
+                                data_output, re.IGNORECASE | re.MULTILINE
+                            )
+                            if attr9_match:
+                                try:
+                                    power_on_hours = f"{int(attr9_match.group(1))} 小时"
+                                    self.logger.debug("Found power_on_hours via method2: %s", power_on_hours)
+                                except:
+                                    pass
+                        
+                        # 方法3：如果前两种方法失败，使用原来的多模式匹配
+                        if power_on_hours == "未知":
+                            power_on_hours = self.extract_value(
+                                data_output,
+                                [
+                                    # 精确匹配属性9行
+                                    r"^\s*9\s+Power_On_Hours\b[^\n]+\s+(\d+)\s*$",
+                                    
+                                    # 通用匹配模式
+                                    r"9\s+Power_On_Hours\b.*?(\d+)\b",
+                                    r"Power_On_Hours\b.*?(\d+)\b",
+                                    r"Power On Hours\s+(\d+)",
+                                    r"Power on time\s*:\s*(\d+)\s*hours"
+                                ],
+                                default="未知",
+                                format_func=lambda x: f"{int(x)} 小时"
+                            )
+                            if power_on_hours != "未知":
+                                self.logger.debug("Found power_on_hours via method3: %s", power_on_hours)
+                        
+                        # 方法4：如果还没找到，尝试扫描整个属性表
+                        if power_on_hours == "未知":
+                            for line in data_output.split('\n'):
+                                if "Power_On_Hours" in line:
+                                    # 尝试提取特殊格式
+                                    match = re.search(r"(\d+)h(?:\+(\d+)m(?:\+(\d+)\.\d+s)?)?", line)
+                                    if match:
+                                        try:
+                                            hours = int(match.group(1))
+                                            if match.group(2):
+                                                minutes = int(match.group(2))
+                                                hours += minutes / 60
+                                            power_on_hours = f"{hours:.1f} 小时"
+                                            self.logger.debug("Found power_on_hours via method4 (special format): %s", power_on_hours)
+                                            break
+                                        except:
+                                            pass
+                                    
+                                    # 尝试提取纯数字
+                                    fields = line.split()
+                                    if fields and fields[-1].isdigit():
+                                        try:
+                                            power_on_hours = f"{int(fields[-1])} 小时"
+                                            self.logger.debug("Found power_on_hours via method4 (numeric): %s", power_on_hours)
+                                            break
+                                        except:
+                                            pass
+                        
+                        disk_info["power_on_hours"] = power_on_hours
+                        
+                        # 添加额外属性：温度历史记录
+                        temp_history = {}
+                        # 提取属性194的温度历史
+                        temp194_match = re.search(r"194\s+Temperature_Celsius\s+.*?\(\s*([\d\s]+)$", data_output)
+                        if temp194_match:
+                            try:
+                                values = [int(x) for x in temp194_match.group(1).split()]
+                                if len(values) >= 4:
+                                    temp_history = {
+                                        "最低温度": f"{values[0]} °C",
+                                        "最高温度": f"{values[1]} °C",
+                                        "当前温度": f"{values[2]} °C",
+                                        "阈值": f"{values[3]} °C" if len(values) > 3 else "N/A"
+                                    }
+                            except:
+                                pass
+                        
+                        # 保存额外属性
+                        disk_info["attributes"] = temp_history
+                        
+                    except Exception as e:
+                        self.logger.warning("Failed to get disk info for %s: %s", device, str(e), exc_info=True)
+                        disk_info["model"] = "未知"
+                        disk_info["serial"] = "未知"
+                        disk_info["capacity"] = "未知"
+                        disk_info["health"] = "检测失败"
+                        disk_info["temperature"] = "未知"
+                        disk_info["power_on_hours"] = "未知"
+                        disk_info["attributes"] = {}
+                else:
+                    # 非活动状态使用未知值
+                    self.logger.debug(f"硬盘 {device} 处于 {status} 状态，跳过检测")
+                    disk_info["model"] = "未知"
+                    disk_info["serial"] = "未知"
+                    disk_info["capacity"] = "未知"
+                    disk_info["health"] = "未检测"
+                    disk_info["temperature"] = "未检测"
+                    disk_info["power_on_hours"] = "未检测"
+                    disk_info["attributes"] = {}
                 
+                disks.append(disk_info)
+                self.logger.debug("Processed disk %s: %s", device, disk_info)
+            
+            # 首次运行完成后标记
+            if self.first_run:
+                self.first_run = False
+                self.logger.info("首次磁盘检测完成")
+            
             self.logger.info("Found %d disks after processing", len(disks))
             return disks
         
