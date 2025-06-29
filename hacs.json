@@ -2,5 +2,7 @@
   "name": "飞牛NAS",
   "domains": ["sensor", "button", "switch"],
   "homeassistant": "2024.1.0",
-  "render_readme": true
+  "render_readme": true,
+  "zip_release": true,
+  "filename": "fn_nas.zip"
 }
