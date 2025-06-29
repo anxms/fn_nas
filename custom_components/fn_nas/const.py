@@ -11,6 +11,7 @@ CONF_HOST = "host"
 CONF_PORT = "port"
 CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
+CONF_ROOT_PASSWORD = "root_password"
 CONF_SSH_KEY = "ssh_key"
 CONF_SCAN_INTERVAL = "scan_interval"
 CONF_FAN_CONFIG_PATH = "fan_config_path"
@@ -48,4 +49,4 @@ ICON_RESTART = "mdi:restart"
 
 # 设备标识符常量
 DEVICE_ID_NAS = "flynas_nas_system"
-DEVICE_ID_UPS = "flynas_ups"  
+DEVICE_ID_UPS = "flynas_ups"

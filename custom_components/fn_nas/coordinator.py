@@ -8,7 +8,8 @@ import json
 from .const import (
     DOMAIN, CONF_HOST, CONF_PORT, CONF_USERNAME, CONF_PASSWORD,
     CONF_IGNORE_DISKS, CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL,
-    DEFAULT_PORT, CONF_MAC, CONF_UPS_SCAN_INTERVAL, DEFAULT_UPS_SCAN_INTERVAL
+    DEFAULT_PORT, CONF_MAC, CONF_UPS_SCAN_INTERVAL, DEFAULT_UPS_SCAN_INTERVAL,
+    CONF_ROOT_PASSWORD
 )
 from .disk_manager import DiskManager
 from .system_manager import SystemManager
@@ -25,12 +26,14 @@ class FlynasCoordinator(DataUpdateCoordinator):
         self.port = config.get(CONF_PORT, DEFAULT_PORT)
         self.username = config[CONF_USERNAME]
         self.password = config[CONF_PASSWORD]
+        self.root_password = config.get(CONF_ROOT_PASSWORD)  # 获取root密码
         self.mac = config.get(CONF_MAC, "")
         self.ssh = None
         self.ssh_closed = True
         self.ups_manager = UPSManager(self)
         _LOGGER.debug("初始化vm_manager")
         self.vm_manager = VMManager(self)
+        self.use_sudo = False  # 添加标志，指示是否需要使用sudo
         
         # 初始化数据字典
         self.data = {
@@ -72,37 +75,72 @@ class FlynasCoordinator(DataUpdateCoordinator):
                 )
                 
                 # 检查当前用户是否为 root
-                result = await self.ssh.run("id -u", check=True)
-                current_user_id = result.stdout.strip()
+                if await self.is_root_user():
+                    _LOGGER.debug("当前用户是 root")
+                    self.use_sudo = False
+                    self.ssh_closed = False
+                    return True
                 
-                # 如果不是 root 用户，尝试切换到 root
-                if current_user_id != "0":
-                    _LOGGER.debug("当前用户非 root，尝试切换到 root")
-                    
-                    # 关闭当前连接
-                    self.ssh.close()
-                    self.ssh_closed = True
-                    self.ssh = None
-                    
-                    # 使用 root 用户重新连接
-                    self.ssh = await asyncssh.connect(
-                        self.host,
-                        port=self.port,
-                        username="root",
-                        password=self.password,
-                        known_hosts=None
-                    )
-                    _LOGGER.info("已切换到 root 用户连接")
+                # 如果不是 root 用户，尝试使用登录密码切换到 root
+                _LOGGER.debug("尝试使用登录密码切换到 root 会话")
+                
+                # 尝试切换到 root
+                result = await self.ssh.run(
+                    f"echo '{self.password}' | sudo -S -i",
+                    input=self.password + "\n",  # 提供登录密码
+                    timeout=10
+                )
+                
+                # 验证是否切换到 root
+                whoami_result = await self.ssh.run("whoami")
+                if "root" in whoami_result.stdout:
+                    _LOGGER.info("成功切换到 root 会话（使用登录密码）")
+                    self.use_sudo = False
+                    self.ssh_closed = False
+                    return True
+                else:
+                    # 如果登录密码无法切换到 root，尝试使用配置的 root 密码
+                    if self.root_password:
+                        _LOGGER.debug("尝试使用 root 密码切换到 root 会话")
+                        
+                        # 尝试切换到 root
+                        result = await self.ssh.run(
+                            f"echo '{self.root_password}' | sudo -S -i",
+                            input=self.root_password + "\n",  # 提供密码
+                            timeout=10
+                        )
+                        
+                        # 验证是否切换到 root
+                        whoami_result = await self.ssh.run("whoami")
+                        if "root" in whoami_result.stdout:
+                            _LOGGER.info("成功切换到 root 会话（使用 root 密码）")
+                            self.use_sudo = False
+                            self.ssh_closed = False
+                            return True
+                        else:
+                            _LOGGER.warning("切换到 root 会话失败，将使用 sudo")
+                            self.use_sudo = True
+                    else:
+                        _LOGGER.warning("非 root 用户且未提供 root 密码，将使用 sudo")
+                        self.use_sudo = True
                 
                 self.ssh_closed = False
-                _LOGGER.info("SSH connection established to %s", self.host)
+                _LOGGER.info("SSH 连接已建立到 %s", self.host)
                 return True
             except Exception as e:
                 self.ssh = None
                 self.ssh_closed = True
-                _LOGGER.error("Failed to connect: %s", str(e))
+                _LOGGER.error("连接失败: %s", str(e), exc_info=True)
                 return False
         return True
+    
+    async def is_root_user(self):
+        """检查当前用户是否为root"""
+        try:
+            result = await self.ssh.run("id -u", timeout=5)
+            return result.stdout.strip() == "0"
+        except Exception:
+            return False
     
     async def async_disconnect(self):
         if self.ssh is not None and not self.ssh_closed:
@@ -122,8 +160,9 @@ class FlynasCoordinator(DataUpdateCoordinator):
         
         try:
             # 发送一个简单的命令来测试连接是否仍然有效
-            result = await self.ssh.run("echo 'connection_test'", timeout=2, check=True)
-            return result.exit_status == 0
+            test_command = "echo 'connection_test'"
+            result = await self.ssh.run(test_command, timeout=2)
+            return result.exit_status == 0 and "connection_test" in result.stdout
         except (asyncssh.Error, TimeoutError):
             return False
     
@@ -137,9 +176,22 @@ class FlynasCoordinator(DataUpdateCoordinator):
                         # 如果重新连接失败，更新系统状态为关闭
                         if self.data and "system" in self.data:
                             self.data["system"]["status"] = "off"
-                        raise UpdateFailed("SSH connection failed")
+                        raise UpdateFailed("SSH 连接失败")
                 
-                result = await self.ssh.run(command, check=True)
+                # 如果需要 sudo，在命令前添加 sudo -i
+                if self.use_sudo:
+                    # 使用 sudo -S 并提供密码（如果可用）
+                    if self.root_password or self.password:
+                        # 优先使用root密码，如果没有则使用登录密码
+                        password = self.root_password if self.root_password else self.password
+                        full_command = f"sudo -S {command}"
+                        result = await self.ssh.run(full_command, input=password + "\n", check=True)
+                    else:
+                        full_command = f"sudo {command}"
+                        result = await self.ssh.run(full_command, check=True)
+                else:
+                    result = await self.ssh.run(command, check=True)
+                
                 return result.stdout.strip()
             
             except asyncssh.process.ProcessError as e:

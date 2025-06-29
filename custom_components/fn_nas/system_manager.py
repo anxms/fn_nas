@@ -154,135 +154,74 @@ class SystemManager:
             return "未知"
     
     def extract_cpu_temp(self, sensors_output: str) -> str:
-        """从 sensors 输出中提取 CPU 温度"""
-        # 首先尝试解析JSON格式
-        if sensors_output.strip().startswith('{'):
-            try:
-                data = json.loads(sensors_output)
-                self.logger.debug("JSON sensors data: %s", json.dumps(data, indent=2))
-                
-                # 查找包含CPU相关键名的温度值
-                candidates = []
-                for key, values in data.items():
-                    # 检查是否是CPU相关的传感器
-                    if any(kw in key.lower() for kw in ["core", "cpu", "package", "tccd", "k10temp", "physical"]):
-                        for subkey, temp_value in values.items():
-                            # 检查是否是温度输入值
-                            if any(kw in subkey.lower() for kw in ["temp", "input"]) and not "crit" in subkey.lower():
-                                try:
-                                    if isinstance(temp_value, (int, float)):
-                                        candidates.append(temp_value)
-                                        self.logger.debug("Found CPU temp candidate in JSON: %s/%s = %.1f°C", key, subkey, temp_value)
-                                except Exception as e:
-                                    self.logger.debug("JSON value error: %s", str(e))
-                
-                # 如果有候选值，取平均值
-                if candidates:
-                    avg_temp = sum(candidates) / len(candidates)
-                    return f"{avg_temp:.1f} °C"
-            except Exception as e:
-                self.logger.warning("Failed to parse sensors JSON: %s", str(e))
-        
-        # 如果JSON解析失败，使用正则表达式
-        # 优先匹配 Package id 0 的值
+        """从 sensors 输出中提取 CPU 温度，优先获取 Package id 0"""
+        # 优先尝试获取 Package id 0 温度值
         package_id_pattern = r'Package id 0:\s*\+?(\d+\.?\d*)°C'
         package_match = re.search(package_id_pattern, sensors_output, re.IGNORECASE)
         if package_match:
             try:
                 package_temp = float(package_match.group(1))
-                self.logger.debug("Found Package id 0 temperature: %.1f°C", package_temp)
+                self.logger.debug("优先使用 Package id 0 温度: %.1f°C", package_temp)
                 return f"{package_temp:.1f} °C"
             except (ValueError, IndexError) as e:
-                self.logger.debug("Package id 0 match error: %s", str(e))
-        
-        # 如果找不到 Package id 0，尝试匹配核心温度
-        core_patterns = [
-            r'Core\s*\d+:\s*\+?(\d+\.?\d*)°C',
-            r'Core \d+:\s*\+?(\d+\.?\d*)°C',
-            r'CPU\d+_TEMP:\s*\+?(\d+\.?\d*)°C'
-        ]
-        
-        core_temps = []
-        for pattern in core_patterns:
-            matches = re.finditer(pattern, sensors_output, re.IGNORECASE)
-            for match in matches:
-                try:
-                    temp = float(match.group(1))
-                    core_temps.append(temp)
-                    self.logger.debug("Found core temperature with pattern: %s: %.1f°C", pattern, temp)
-                except (ValueError, IndexError) as e:
-                    self.logger.debug("Core pattern match error: %s", str(e))
-        
-        # 如果有核心温度值，取平均值
-        if core_temps:
-            avg_temp = sum(core_temps) / len(core_temps)
-            self.logger.debug("Using average core temperature: %.1f°C", avg_temp)
-            return f"{avg_temp:.1f} °C"
-        
-        # 如果找不到核心温度，尝试其他模式
+                self.logger.debug("Package id 0 解析错误: %s", str(e))
+
+        # 其次尝试解析JSON格式
+        if sensors_output.strip().startswith('{'):
+            try:
+                data = json.loads(sensors_output)
+                self.logger.debug("JSON sensors data: %s", json.dumps(data, indent=2))
+                
+                # 查找包含Package相关键名的温度值
+                for key, values in data.items():
+                    if any(kw in key.lower() for kw in ["package", "pkg", "physical"]):
+                        for subkey, temp_value in values.items():
+                            if any(kw in subkey.lower() for kw in ["temp", "input"]) and not "crit" in subkey.lower():
+                                try:
+                                    if isinstance(temp_value, (int, float)):
+                                        self.logger.debug("JSON中找到Package温度: %s/%s = %.1f°C", key, subkey, temp_value)
+                                        return f"{temp_value:.1f} °C"
+                                except Exception as e:
+                                    self.logger.debug("JSON值错误: %s", str(e))
+                # 新增：尝试直接获取Tdie/Tctl温度（AMD CPU）
+                for key, values in data.items():
+                    if "k10temp" in key.lower():
+                        for subkey, temp_value in values.items():
+                            if "tdie" in subkey.lower() or "tctl" in subkey.lower():
+                                try:
+                                    if isinstance(temp_value, (int, float)):
+                                        self.logger.debug("JSON中找到Tdie/Tctl温度: %s/%s = %.1f°C", key, subkey, temp_value)
+                                        return f"{temp_value:.1f} °C"
+                                except Exception:
+                                    pass
+            except Exception as e:
+                self.logger.warning("JSON解析失败: %s", str(e))
+
+        # 最后尝试其他模式
         other_patterns = [
-            r'Package id 0:\s*\+?(\d+\.?\d*)°C',
+            r'Package id 0:\s*\+?(\d+\.?\d*)°C',  # 再次尝试确保捕获
             r'CPU Temperature:\s*\+?(\d+\.?\d*)°C',
             r'cpu_thermal:\s*\+?(\d+\.?\d*)°C',
-            r'Tdie:\s*\+?(\d+\.?\d*)°C',
-            r'Tctl:\s*\+?(\d+\.?\d*)°C',
+            r'Tdie:\s*\+?(\d+\.?\d*)°C',          # AMD CPU
+            r'Tctl:\s*\+?(\d+\.?\d*)°C',          # AMD CPU
             r'PECI Agent \d:\s*\+?(\d+\.?\d*)°C',
-            r'CPUTIN:\s*\+?(\d+\.?\d*)°C',
             r'Composite:\s*\+?(\d+\.?\d*)°C',
             r'CPU\s+Temp:\s*\+?(\d+\.?\d*)°C',
-            r'k10temp-pci\S*:\s*\+?(\d+\.?\d*)°C',  # AMD CPU
-            r'temp\d+:\s*\+?(\d+\.?\d*)°C',  # 通用温度传感器
-            r'Processor\s+Temp:\s*\+?(\d+\.?\d*)°C',
-            r'CPU\s*:\s*\+?(\d+\.?\d*)°C',
+            r'k10temp-pci\S*:\s*\+?(\d+\.?\d*)°C',
             r'Physical id 0:\s*\+?(\d+\.?\d*)°C'
         ]
         
-        temp_values = []
-        found_any = False
         for pattern in other_patterns:
-            matches = re.finditer(pattern, sensors_output, re.IGNORECASE)
-            for match in matches:
+            match = re.search(pattern, sensors_output, re.IGNORECASE)
+            if match:
                 try:
                     temp = float(match.group(1))
-                    temp_values.append(temp)
-                    found_any = True
-                    self.logger.debug("Found CPU temperature with pattern: %s: %.1f°C", pattern, temp)
-                except (ValueError, IndexError) as e:
-                    self.logger.debug("Pattern match error: %s", str(e))
+                    self.logger.debug("匹配到CPU温度: %s: %.1f°C", pattern, temp)
+                    return f"{temp:.1f} °C"
+                except (ValueError, IndexError):
                     continue
         
-        # 如果有找到温度值，取平均值
-        if temp_values:
-            avg_temp = sum(temp_values) / len(temp_values)
-            return f"{avg_temp:.1f} °C"
-        
-        # 如果所有模式都失败，尝试手动扫描所有温度值
-        fallback_candidates = []
-        for line in sensors_output.splitlines():
-            if '°C' in line:
-                # 跳过明显非CPU的行
-                if any(kw in line.lower() for kw in ["fan", "vin", "volt", "+3.3", "+5", "+12", "vdd", "power", "crit", "max"]):
-                    continue
-                    
-                # 查找温度值
-                match = re.search(r'(\d+\.?\d*)\s*°C', line)
-                if match:
-                    try:
-                        temp = float(match.group(1))
-                        # 合理温度范围检查
-                        if 0 < temp < 120:
-                            fallback_candidates.append(temp)
-                            self.logger.debug("Fallback candidate: %s -> %.1f°C", line.strip(), temp)
-                    except ValueError:
-                        continue
-        
-        # 如果有候选值，取平均值
-        if fallback_candidates:
-            avg_temp = sum(fallback_candidates) / len(fallback_candidates)
-            self.logger.warning("Using fallback CPU temperature detection")
-            return f"{avg_temp:.1f} °C"
-        
-        # self.logger.warning("No CPU temperature found in sensors output")
+        # 如果所有方法都失败返回未知
         return "未知"
 
     def extract_temp_from_systin(self, systin_data: dict) -> float:
