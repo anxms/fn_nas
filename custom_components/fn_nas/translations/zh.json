@@ -1,0 +1,9 @@
+{
+  "config": {
+    "step": {
+      "select_mac": {
+        "title": "选择用于网络唤醒的MAC地址"
+      }
+    }
+  }
+}

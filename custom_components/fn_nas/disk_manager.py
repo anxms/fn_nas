@@ -414,7 +414,7 @@ class DiskManager:
                     if fields and fields[-1].isdigit():
                         try:
                             power_on_hours = f"{int(fields[-1])} 小时"
-                            self.log极Debug("Found power_on_hours via method4 (numeric): %s", power_on_hours)
+                            self.logger.debug("Found power_on_hours via method4 (numeric): %s", power_on_hours)
                             break
                         except:
                             pass
@@ -424,7 +424,7 @@ class DiskManager:
         # 添加额外属性：温度历史记录
         temp_history = {}
         # 提取属性194的温度历史
-        temp194_match = re.search(r"194\s+Temperature_Celsius极s+.*?\(\s*([\d\s]+)$", data_output)
+        temp194_match = re.search(r"194\s+Temperature_Celsius+.*?\(\s*([\d\s]+)$", data_output)
         if temp194_match:
             try:
                 values = [int(x) for x in temp194_match.group(1).split()]

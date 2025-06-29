@@ -392,7 +392,7 @@ class SystemManager:
         """关闭系统"""
         self.logger.info("Initiating system shutdown...")
         try:
-            await self.coordinator.run_command("sudo poweroff")
+            await self.coordinator.run_command("sudo shutdown -h now")
             self.logger.info("Shutdown command sent")
             
             # 立即更新系统状态为关闭

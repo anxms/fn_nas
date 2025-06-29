@@ -13,11 +13,11 @@ _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
     domain_data = hass.data[DOMAIN][config_entry.entry_id]
-    coordinator = domain_data[DATA_UPDATE_COORDINATOR]  # 主协调器
-    ups_coordinator = domain_data["ups_coordinator"]   # UPS协调器
+    coordinator = domain_data[DATA_UPDATE_COORDINATOR]
+    ups_coordinator = domain_data["ups_coordinator"]
     
     entities = []
-    existing_ids = set()  # 用于跟踪已创建的实体ID，防止重复添加
+    existing_ids = set()
     
     # 添加硬盘传感器
     for disk in coordinator.data.get("disks", []):
@@ -124,7 +124,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                         coordinator, 
                         vm["name"],
                         vm.get("title", vm["name"]),
-                        config_entry.entry_id  # 传递entry_id用于生成唯一ID
+                        config_entry.entry_id
                     )
                 )
                 existing_ids.add(vm_uid)
@@ -231,6 +231,7 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     
     async_add_entities(entities)
 
+
 class DiskSensor(CoordinatorEntity, SensorEntity):
     def __init__(self, coordinator, device_id, sensor_type, name, unique_id, unit, icon, disk_info):
         super().__init__(coordinator)
@@ -254,38 +255,25 @@ class DiskSensor(CoordinatorEntity, SensorEntity):
             if disk["device"] == self.device_id:
                 if self.sensor_type == HDD_TEMP:
                     temp = disk.get("temperature")
-                    
-                    # 处理未知温度值 - 返回None而不是字符串
                     if temp is None or temp == "未知" or temp == "未检测":
                         return None
-                        
-                    # 如果是字符串，尝试提取数字部分
                     if isinstance(temp, str):
-                        # 尝试从字符串中提取数字部分
                         try:
                             if "°C" in temp:
                                 return float(temp.replace("°C", "").strip())
                             return float(temp)
                         except ValueError:
                             return None
-                    # 如果是数值类型，直接返回
                     elif isinstance(temp, (int, float)):
                         return temp
-                    
                     return None
-                    
                 elif self.sensor_type == HDD_HEALTH:
                     health = disk.get("health", "未知")
-                    # 处理未检测状态
                     if health == "未检测":
                         return "未检测"
                     return health if health != "未知" else "未知状态"
-                
                 elif self.sensor_type == HDD_STATUS:
-                    # 返回硬盘状态（活动中、空闲中、休眠中、未知）
                     return disk.get("status", "未知")
-                    
-        # 如果找不到磁盘信息，返回None
         return None
     
     @property
@@ -318,30 +306,22 @@ class SystemSensor(CoordinatorEntity, SensorEntity):
             "name": "飞牛NAS系统监控",
             "manufacturer": "飞牛"
         }
-        self._last_uptime = None  # 跟踪上次的运行时间
+        self._last_uptime = None
     
     @property
     def native_value(self):
         system_data = self.coordinator.data.get("system", {})
-        # 直接获取原始运行时间（秒数）
-        uptime_seconds = system_data.get("uptime_seconds", 0)
         status = system_data.get("status", "unknown")
         
-        # 如果系统状态是离线，显示离线状态
         if status == "off":
             return "离线"
-        
-        # 如果系统状态是重启中，显示重启中状态
         if status == "rebooting":
             return "重启中"
-            
-        # 如果系统状态是未知，显示未知
         if status == "unknown":
             return "状态未知"
         
-        # 系统在线时显示运行时间
         try:
-            # 如果运行时间没有变化，直接返回上次的值
+            uptime_seconds = system_data.get("uptime_seconds", 0)
             if self._last_uptime == uptime_seconds:
                 return self._last_value
             
@@ -383,15 +363,12 @@ class CPUTempSensor(CoordinatorEntity, SensorEntity):
         system_data = self.coordinator.data.get("system", {})
         temp_str = system_data.get("cpu_temperature", "未知")
         
-        # 如果系统离线，显示空值
         if system_data.get("status") == "off":
             return None
         
-        # 处理未知温度值
         if temp_str is None or temp_str == "未知":
             return None
         
-        # 提取温度数值
         if isinstance(temp_str, (int, float)):
             return temp_str
             
@@ -421,32 +398,20 @@ class MoboTempSensor(CoordinatorEntity, SensorEntity):
         system_data = self.coordinator.data.get("system", {})
         temp_str = system_data.get("motherboard_temperature", "未知")
         
-        # 系统离线时返回空值
         if system_data.get("status") == "off":
             return None
         
-        # 处理未知值
         if temp_str is None or temp_str == "未知":
             return None
         
-        # 数值类型直接返回
         if isinstance(temp_str, (int, float)):
             return temp_str
             
-        # 增强字符串解析逻辑
         try:
-            # 移除温度单位标识（支持多种格式）
             cleaned = temp_str.lower().replace('°c', '').replace('c', '').strip()
-            
-            # 尝试转换为浮点数
             return float(cleaned)
         except (ValueError, TypeError) as e:
-            # 记录详细错误信息
-            _LOGGER.warning(
-                "主板温度解析失败: 原始值='%s', 错误: %s",
-                temp_str,
-                str(e)
-            )
+            _LOGGER.warning("主板温度解析失败: 原始值='%s', 错误: %s", temp_str, str(e))
             return None
 
 class UPSSensor(CoordinatorEntity, SensorEntity):

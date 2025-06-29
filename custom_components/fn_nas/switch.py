@@ -12,11 +12,8 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     coordinator = domain_data[DATA_UPDATE_COORDINATOR]
     
     entities = []
-    
-    # 添加NAS电源开关
     entities.append(PowerSwitch(coordinator, config_entry))
     
-    # 添加虚拟机开关
     if "vms" in coordinator.data:
         for vm in coordinator.data["vms"]:
             entities.append(
@@ -30,21 +27,19 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     async_add_entities(entities)
 
 class PowerSwitch(CoordinatorEntity, SwitchEntity):
-    """NAS电源开关实体"""
-    _attr_name = "电源"
-    _attr_unique_id = "flynas_power"
-    _attr_entity_category = EntityCategory.CONFIG
-    
     def __init__(self, coordinator, config_entry):
         super().__init__(coordinator)
         self.config_entry = config_entry
+        self._attr_name = "电源"
+        self._attr_unique_id = "flynas_power"
+        self._attr_entity_category = EntityCategory.CONFIG
         self._attr_device_info = {
             "identifiers": {(DOMAIN, DEVICE_ID_NAS)},
             "name": "飞牛NAS系统",
             "manufacturer": "飞牛",
             "model": "飞牛NAS"
         }
-        self._last_status = None  # 跟踪上次状态
+        self._last_status = None
     
     @property
     def is_on(self):
@@ -59,7 +54,6 @@ class PowerSwitch(CoordinatorEntity, SwitchEntity):
                 'send_magic_packet',
                 {'mac': mac}
             )
-            # 立即更新状态为开启
             self.coordinator.data["system"]["status"] = "on"
             self.coordinator.async_update_listeners()
             self.async_write_ha_state()
@@ -68,23 +62,18 @@ class PowerSwitch(CoordinatorEntity, SwitchEntity):
     
     async def async_turn_off(self, **kwargs):
         await self.coordinator.shutdown_system()
-        # 立即更新状态为关闭
         self.coordinator.data["system"]["status"] = "off"
         self.coordinator.async_update_listeners()
         self.async_write_ha_state()
     
-    @callback  # 这里需要callback装饰器
+    @callback
     def _handle_coordinator_update(self) -> None:
-        """处理协调器更新"""
-        # 获取当前系统状态
         system_data = self.coordinator.data.get("system", {})
         new_status = system_data.get("status", "unknown")
         
-        # 如果状态发生变化，强制更新UI
         if self._last_status != new_status:
             self.async_write_ha_state()
         
-        # 更新上次状态记录
         self._last_status = new_status
         super()._handle_coordinator_update()
     
@@ -99,8 +88,6 @@ class PowerSwitch(CoordinatorEntity, SwitchEntity):
         }
 
 class VMSwitch(CoordinatorEntity, SwitchEntity):
-    """虚拟机电源开关实体"""
-    
     def __init__(self, coordinator, vm_name, vm_title):
         super().__init__(coordinator)
         self.vm_name = vm_name
@@ -112,20 +99,16 @@ class VMSwitch(CoordinatorEntity, SwitchEntity):
             "name": vm_title,
             "via_device": (DOMAIN, DEVICE_ID_NAS)
         }
-        
-        # 直接获取vm_manager实例
         self.vm_manager = coordinator.vm_manager if hasattr(coordinator, 'vm_manager') else None
     
     @property
     def is_on(self):
-        """检查虚拟机是否运行"""
         for vm in self.coordinator.data.get("vms", []):
             if vm["name"] == self.vm_name:
                 return vm["state"] == "running"
         return False
     
     async def async_turn_on(self, **kwargs):
-        """启动虚拟机"""
         if not self.vm_manager:
             _LOGGER.error("vm_manager不可用，无法启动虚拟机 %s", self.vm_name)
             return
@@ -133,18 +116,14 @@ class VMSwitch(CoordinatorEntity, SwitchEntity):
         try:
             success = await self.vm_manager.control_vm(self.vm_name, "start")
             if success:
-                # 更新本地状态
                 for vm in self.coordinator.data.get("vms", []):
                     if vm["name"] == self.vm_name:
                         vm["state"] = "running"
                 self.async_write_ha_state()
-            else:
-                _LOGGER.error("无法启动虚拟机 %s", self.vm_name)
         except Exception as e:
             _LOGGER.error("启动虚拟机时出错: %s", str(e), exc_info=True)
     
     async def async_turn_off(self, **kwargs):
-        """关闭虚拟机"""
         if not self.vm_manager:
             _LOGGER.error("vm_manager不可用，无法关闭虚拟机 %s", self.vm_name)
             return
@@ -152,19 +131,15 @@ class VMSwitch(CoordinatorEntity, SwitchEntity):
         try:
             success = await self.vm_manager.control_vm(self.vm_name, "shutdown")
             if success:
-                # 更新本地状态
                 for vm in self.coordinator.data.get("vms", []):
                     if vm["name"] == self.vm_name:
                         vm["state"] = "shut off"
                 self.async_write_ha_state()
-            else:
-                _LOGGER.error("无法关闭虚拟机 %s", self.vm_name)
         except Exception as e:
             _LOGGER.error("关闭虚拟机时出错: %s", str(e), exc_info=True)
     
     @property
     def extra_state_attributes(self):
-        """返回虚拟机额外属性"""
         for vm in self.coordinator.data.get("vms", []):
             if vm["name"] == self.vm_name:
                 return {
