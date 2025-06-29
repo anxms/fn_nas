@@ -1,0 +1,29 @@
+{
+  "config": {
+    "title": "飞牛NAS",
+    "step": {
+      "user": {
+        "title": "登录信息",
+        "data": {
+          "host": "主机名或IP",
+          "port": "端口",
+          "username": "用户名",
+          "password": "密码",
+          "scan_interval": "扫描间隔（秒）",
+          "ups_scan_interval": "UPS扫描间隔（秒）"
+        }
+      },
+      "select_mac": {
+        "title": "选择用于网络唤醒的MAC地址"
+      }
+    },
+    "abort": {
+      "already_configured": "设备已配置",
+      "not_found": "设备未找到"
+    },
+    "error": {
+      "invalid_host": "无效的主机名或IP地址",
+      "cannot_connect": "无法连接到设备"
+    }
+  }
+}
