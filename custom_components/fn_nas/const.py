@@ -18,6 +18,8 @@ CONF_FAN_CONFIG_PATH = "fan_config_path"
 CONF_IGNORE_DISKS = "ignore_disks"
 CONF_MAC = "mac"
 CONF_UPS_SCAN_INTERVAL = "ups_scan_interval"
+CONF_ENABLE_DOCKER = "enable_docker"
+DOCKER_CONTAINERS = "docker_containers"
 
 DEFAULT_PORT = 22
 DEFAULT_SCAN_INTERVAL = 60

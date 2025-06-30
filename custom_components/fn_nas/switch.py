@@ -23,7 +23,19 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                     vm.get("title", vm["name"])
                 )
             )
-    
+
+    if coordinator.data.get("docker_containers") and coordinator.enable_docker:
+        for container in coordinator.data["docker_containers"]:
+            # 使用容器名称作为唯一ID的一部分
+            safe_name = container["name"].replace(" ", "_").replace("/", "_")
+            entities.append(
+                DockerContainerSwitch(
+                    coordinator, 
+                    container["name"],
+                    safe_name
+                )
+            )
+
     async_add_entities(entities)
 
 class PowerSwitch(CoordinatorEntity, SwitchEntity):
@@ -147,3 +159,42 @@ class VMSwitch(CoordinatorEntity, SwitchEntity):
                     "原始状态": vm["state"]
                 }
         return {}
+
+# 添加DockerContainerSwitch类
+class DockerContainerSwitch(CoordinatorEntity, SwitchEntity):
+    def __init__(self, coordinator, container_name, safe_name):
+        super().__init__(coordinator)
+        self.container_name = container_name
+        self._attr_name = f"{container_name} 容器"
+        self._attr_unique_id = f"docker_{safe_name}_switch"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, f"docker_{safe_name}")},
+            "name": container_name,
+            "via_device": (DOMAIN, DEVICE_ID_NAS)
+        }
+
+    @property
+    def is_on(self):
+        for container in self.coordinator.data.get("docker_containers", []):
+            if container["name"] == self.container_name:
+                return container["status"] == "running"
+        return False
+
+    async def async_turn_on(self, **kwargs):
+        if self.coordinator.docker_manager:
+            success = await self.coordinator.docker_manager.control_container(self.container_name, "start")
+            if success:
+                # 更新状态
+                for container in self.coordinator.data.get("docker_containers", []):
+                    if container["name"] == self.container_name:
+                        container["status"] = "running"
+                self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs):
+        if self.coordinator.docker_manager:
+            success = await self.coordinator.docker_manager.control_container(self.container_name, "stop")
+            if success:
+                for container in self.coordinator.data.get("docker_containers", []):
+                    if container["name"] == self.container_name:
+                        container["status"] = "exited"  # Docker停止后状态为exited
+                self.async_write_ha_state()

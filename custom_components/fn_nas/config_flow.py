@@ -17,7 +17,8 @@ from .const import (
     CONF_FAN_CONFIG_PATH,
     CONF_UPS_SCAN_INTERVAL, 
     DEFAULT_UPS_SCAN_INTERVAL,
-    CONF_ROOT_PASSWORD
+    CONF_ROOT_PASSWORD,
+    CONF_ENABLE_DOCKER
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -68,7 +69,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Optional(
                 CONF_SCAN_INTERVAL, 
                 default=DEFAULT_SCAN_INTERVAL
-            ): int
+            ): int,
+            # 添加启用Docker的选项
+            vol.Optional(CONF_ENABLE_DOCKER, default=False): bool
         })
         
         return self.async_show_form(
@@ -96,7 +99,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             selected_mac = user_input.get(CONF_MAC)
             if selected_mac:
+                # 将CONF_ENABLE_DOCKER从ssh_config复制到最终配置
+                enable_docker = self.ssh_config.get(CONF_ENABLE_DOCKER, False)
                 self.ssh_config[CONF_MAC] = selected_mac
+                # 确保将CONF_ENABLE_DOCKER也存入配置项
+                self.ssh_config[CONF_ENABLE_DOCKER] = enable_docker
                 return self.async_create_entry(
                     title=self.ssh_config[CONF_HOST],
                     data=self.ssh_config
@@ -208,7 +215,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             vol.Optional(
                 CONF_UPS_SCAN_INTERVAL,
                 default=data.get(CONF_UPS_SCAN_INTERVAL, DEFAULT_UPS_SCAN_INTERVAL)
-            ): int
+            ): int,
+            # 在选项流程中也添加启用Docker的选项
+            vol.Optional(
+                CONF_ENABLE_DOCKER,
+                default=data.get(CONF_ENABLE_DOCKER, False)
+            ): bool
         })
         
         return self.async_show_form(

@@ -9,7 +9,8 @@
           "port": "端口",
           "username": "用户名",
           "password": "密码",
-          "scan_interval": "数据更新间隔(秒)"
+          "scan_interval": "数据更新间隔(秒)",
+          "enable_docker": "启用docker控制"
         }
       },
       "select_mac": {

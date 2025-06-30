@@ -9,12 +9,13 @@ from .const import (
     DOMAIN, CONF_HOST, CONF_PORT, CONF_USERNAME, CONF_PASSWORD,
     CONF_IGNORE_DISKS, CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL,
     DEFAULT_PORT, CONF_MAC, CONF_UPS_SCAN_INTERVAL, DEFAULT_UPS_SCAN_INTERVAL,
-    CONF_ROOT_PASSWORD
+    CONF_ROOT_PASSWORD, CONF_ENABLE_DOCKER
 )
 from .disk_manager import DiskManager
 from .system_manager import SystemManager
 from .ups_manager import UPSManager
 from .vm_manager import VMManager
+from .docker_manager import DockerManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +28,8 @@ class FlynasCoordinator(DataUpdateCoordinator):
         self.password = config[CONF_PASSWORD]
         self.root_password = config.get(CONF_ROOT_PASSWORD)
         self.mac = config.get(CONF_MAC, "")
+        self.enable_docker = config.get(CONF_ENABLE_DOCKER, False)
+        self.docker_manager = DockerManager(self) if self.enable_docker else None
         self.ssh = None
         self.ssh_closed = True
         self.ups_manager = UPSManager(self)
@@ -235,6 +238,10 @@ class FlynasCoordinator(DataUpdateCoordinator):
             
             for vm in vms:
                 vm["title"] = await self.vm_manager.get_vm_title(vm["name"])
+
+            docker_containers = []
+            if self.enable_docker:
+                docker_containers = await self.docker_manager.get_containers()
             
             data = {
                 "disks": disks,
@@ -243,7 +250,8 @@ class FlynasCoordinator(DataUpdateCoordinator):
                     "status": status
                 },
                 "ups": ups_info,
-                "vms": vms
+                "vms": vms,
+                "docker_containers": docker_containers
             }
             
             return data

@@ -1,7 +1,7 @@
 import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from .const import DOMAIN, DATA_UPDATE_COORDINATOR, PLATFORMS
+from .const import DOMAIN, DATA_UPDATE_COORDINATOR, PLATFORMS, CONF_ENABLE_DOCKER  # 导入新增常量
 from .coordinator import FlynasCoordinator, UPSDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -16,13 +16,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     _LOGGER.debug("协调器是否有control_vm方法: %s", hasattr(coordinator, 'control_vm'))
     _LOGGER.debug("协调器是否有vm_manager属性: %s", hasattr(coordinator, 'vm_manager'))
     
+    # 检查是否启用Docker，并初始化Docker管理器（如果有）
+    enable_docker = config.get(CONF_ENABLE_DOCKER, False)
+    if enable_docker:
+        # 导入Docker管理器并初始化
+        from .docker_manager import DockerManager
+        coordinator.docker_manager = DockerManager(coordinator)
+        _LOGGER.debug("已启用Docker容器监控")
+    else:
+        coordinator.docker_manager = None
+        _LOGGER.debug("未启用Docker容器监控")
+    
     ups_coordinator = UPSDataUpdateCoordinator(hass, config, coordinator)
     await ups_coordinator.async_config_entry_first_refresh()
     
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {
         DATA_UPDATE_COORDINATOR: coordinator,
-        "ups_coordinator": ups_coordinator
+        "ups_coordinator": ups_coordinator,
+        CONF_ENABLE_DOCKER: enable_docker  # 存储启用状态
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

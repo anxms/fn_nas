@@ -228,7 +228,22 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                 )
             )
             existing_ids.add(ups_status_uid)
-    
+
+        if coordinator.data.get("docker_containers") and coordinator.enable_docker:
+            for container in coordinator.data["docker_containers"]:
+                safe_name = container["name"].replace(" ", "_").replace("/", "_")
+                sensor_uid = f"{config_entry.entry_id}_docker_{safe_name}_status"
+                if sensor_uid not in existing_ids:
+                    entities.append(
+                        DockerContainerStatusSensor(
+                            coordinator, 
+                            container["name"],
+                            safe_name,
+                            config_entry.entry_id
+                        )
+                    )
+                    existing_ids.add(sensor_uid)
+
     async_add_entities(entities)
 
 
@@ -495,3 +510,31 @@ class VMStatusSensor(CoordinatorEntity, SensorEntity):
                 elif vm["state"] == "rebooting":
                     return "mdi:server-security"
         return "mdi:server"
+
+# 添加DockerContainerStatusSensor类
+class DockerContainerStatusSensor(CoordinatorEntity, SensorEntity):
+    def __init__(self, coordinator, container_name, safe_name, entry_id):
+        super().__init__(coordinator)
+        self.container_name = container_name
+        self._attr_name = f"{container_name} 状态"
+        self._attr_unique_id = f"{entry_id}_docker_{safe_name}_status"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, f"docker_{safe_name}")},
+            "name": container_name,
+            "via_device": (DOMAIN, DEVICE_ID_NAS)
+        }
+
+    @property
+    def native_value(self):
+        for container in self.coordinator.data.get("docker_containers", []):
+            if container["name"] == self.container_name:
+                # 状态映射为中文
+                status_map = {
+                    "running": "运行中",
+                    "exited": "已停止",
+                    "paused": "已暂停",
+                    "restarting": "重启中",
+                    "dead": "死亡"
+                }
+                return status_map.get(container["status"], container["status"])
+        return "未知"
