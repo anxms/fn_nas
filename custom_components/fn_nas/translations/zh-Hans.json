@@ -1,0 +1,48 @@
+{
+  "config": {
+    "title": "飞牛NAS",
+    "step": {
+      "user": {
+        "title": "登录信息",
+        "data": {
+          "host": "主机名或IP",
+          "port": "端口",
+          "username": "用户名",
+          "password": "密码",
+          "scan_interval": "数据更新间隔(秒)"
+        }
+      },
+      "select_mac": {
+        "title": "选择用于网络唤醒的MAC地址",
+        "data": {
+          "mac": "MAC地址"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "设备已配置",
+      "not_found": "设备未找到",
+      "connection_failed": "连接失败",
+      "unknown_error": "未知错误",
+      "sudo_permission_required": "需要sudo权限"
+    },
+    "error": {
+      "invalid_host": "无效的主机名或IP地址",
+      "cannot_connect": "无法连接到设备",
+      "invalid_auth": "认证失败",
+      "unknown": "未知错误"
+    },
+    "options": {
+      "step": {
+        "init": {
+          "title": "配置选项",
+          "data": {
+            "ignore_disks": "忽略的磁盘设备(逗号分隔)",
+            "fan_config_path": "风扇配置文件路径",
+            "ups_scan_interval": "UPS更新间隔(秒)"
+          }
+        }
+      }
+    }
+  }
+}
