@@ -25,42 +25,7 @@
 
 ## 🔧 飞牛NAS端配置
 
-### SSH访问设置
-1. 使用管理员账户登录SSH（非root）
-2. 获取root权限：
-```shell
-sudo -i
-```
-3. 设置root密码：
-```shell
-passwd root
-```
-4. 修改SSH配置：
-```shell
-nano /etc/ssh/sshd_config
-```
-*   找到并修改：
-```shell
-PermitRootLogin yes      # 取消注释并修改
-PasswordAuthentication yes  # 确保已启用
-```
-5. 保存配置：
-*   Nano编辑器：`Ctrl+O` → `Enter` → `Ctrl+X`
-6. 重启SSH服务：
-```
-systemctl restart ssh
-```
-
-### 传感器驱动配置
-1. 运行传感器检测：
-```shell
-sensors-detect
-```
-*   按提示选择 `yes` 或 `y`
-2. 重启NAS：
-```
-reboot
-```
+### 现已支持非root用户访问，无需配置ssh
 
 ## 💻 Home Assistant安装
 
