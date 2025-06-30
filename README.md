@@ -25,7 +25,7 @@
 
 ## 🔧 飞牛NAS端配置
 
-### 现已支持非root用户访问，无需配置ssh
+### 现已支持非root用户访问，无需配置ssh，需要开启飞牛SSH服务
 
 ## 💻 Home Assistant安装
 
