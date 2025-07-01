@@ -243,6 +243,38 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
                         )
                     )
                     existing_ids.add(sensor_uid)
+    
+    # 添加剩余内存传感器
+    mem_available_uid = f"{config_entry.entry_id}_memory_available"
+    if mem_available_uid not in existing_ids:
+        entities.append(
+            MemoryAvailableSensor(
+                coordinator,
+                "可用内存",
+                mem_available_uid,
+                "GB",
+                "mdi:memory"
+            )
+        )
+        existing_ids.add(mem_available_uid)
+    
+    # 添加存储卷的剩余容量传感器（每个卷一个）
+    system_data = coordinator.data.get("system", {})
+    volumes = system_data.get("volumes", {})
+    for mount_point in volumes:
+        # 创建剩余容量传感器
+        vol_avail_uid = f"{config_entry.entry_id}_{mount_point.replace('/', '_')}_available"
+        if vol_avail_uid not in existing_ids:
+            entities.append(
+                VolumeAvailableSensor(
+                    coordinator,
+                    f"{mount_point} 可用空间",
+                    vol_avail_uid,
+                    "mdi:harddisk",
+                    mount_point
+                )
+            )
+            existing_ids.add(vol_avail_uid)
 
     async_add_entities(entities)
 
@@ -538,3 +570,128 @@ class DockerContainerStatusSensor(CoordinatorEntity, SensorEntity):
                 }
                 return status_map.get(container["status"], container["status"])
         return "未知"
+
+class MemoryAvailableSensor(CoordinatorEntity, SensorEntity):
+    """剩余内存传感器（包含总内存和已用内存作为属性）"""
+    
+    def __init__(self, coordinator, name, unique_id, unit, icon):
+        super().__init__(coordinator)
+        self._attr_name = name
+        self._attr_unique_id = unique_id
+        self._attr_native_unit_of_measurement = unit
+        self._attr_icon = icon
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, DEVICE_ID_NAS)},
+            "name": "飞牛NAS系统监控",
+            "manufacturer": "飞牛"
+        }
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+    
+    @property
+    def native_value(self):
+        """返回可用内存（GB）"""
+        system_data = self.coordinator.data.get("system", {})
+        mem_available = system_data.get("memory_available")
+        
+        if mem_available is None or mem_available == "未知":
+            return None
+        
+        try:
+            # 将字节转换为GB
+            return round(float(mem_available) / (1024 ** 3), 2)
+        except (TypeError, ValueError):
+            return None
+    
+    @property
+    def extra_state_attributes(self):
+        """返回总内存和已用内存（GB）以及原始字节值"""
+        system_data = self.coordinator.data.get("system", {})
+        mem_total = system_data.get("memory_total")
+        mem_used = system_data.get("memory_used")
+        mem_available = system_data.get("memory_available")
+        
+        # 转换为GB
+        try:
+            mem_total_gb = round(float(mem_total) / (1024 ** 3), 2) if mem_total and mem_total != "未知" else None
+        except:
+            mem_total_gb = None
+            
+        try:
+            mem_used_gb = round(float(mem_used) / (1024 ** 3), 2) if mem_used and mem_used != "未知" else None
+        except:
+            mem_used_gb = None
+            
+        return {
+            "总内存 (GB)": mem_total_gb,
+            "已用内存 (GB)": mem_used_gb
+        }
+
+class VolumeAvailableSensor(CoordinatorEntity, SensorEntity):
+    """存储卷剩余容量传感器（包含总容量和已用容量作为属性）"""
+    
+    def __init__(self, coordinator, name, unique_id, icon, mount_point):
+        super().__init__(coordinator)
+        self._attr_name = name
+        self._attr_unique_id = unique_id
+        self._attr_icon = icon
+        self.mount_point = mount_point
+        
+        # 设备信息，归属到飞牛NAS系统
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, DEVICE_ID_NAS)},
+            "name": "飞牛NAS系统监控",
+            "manufacturer": "飞牛"
+        }
+        
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+    
+    @property
+    def native_value(self):
+        """返回剩余容量（数值）"""
+        system_data = self.coordinator.data.get("system", {})
+        volumes = system_data.get("volumes", {})
+        vol_info = volumes.get(self.mount_point, {})
+        
+        avail_str = vol_info.get("available", "未知")
+        if avail_str == "未知":
+            return None
+        
+        try:
+            numeric_part = ''.join(filter(lambda x: x.isdigit() or x == '.', avail_str))
+            return float(numeric_part)
+        except (TypeError, ValueError):
+            return None
+    
+    @property
+    def native_unit_of_measurement(self):
+        """动态返回单位"""
+        system_data = self.coordinator.data.get("system", {})
+        volumes = system_data.get("volumes", {})
+        vol_info = volumes.get(self.mount_point, {})
+        
+        avail_str = vol_info.get("available", "")
+        if avail_str.endswith("T") or avail_str.endswith("Ti"):
+            return "TB"
+        elif avail_str.endswith("G") or avail_str.endswith("Gi"):
+            return "GB"
+        elif avail_str.endswith("M") or avail_str.endswith("Mi"):
+            return "MB"
+        else:
+            return None  # 未知单位
+    
+    @property
+    def extra_state_attributes(self):
+        system_data = self.coordinator.data.get("system", {})
+        volumes = system_data.get("volumes", {})
+        vol_info = volumes.get(self.mount_point, {})
+        
+        return {
+            "挂载点": self.mount_point,
+            "文件系统": vol_info.get("filesystem", "未知"),
+            "总容量": vol_info.get("size", "未知"),
+            "已用容量": vol_info.get("used", "未知"),
+            "使用率": vol_info.get("use_percent", "未知")
+        }
+        
+        
+        return attributes

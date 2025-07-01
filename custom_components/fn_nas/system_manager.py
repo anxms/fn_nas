@@ -58,15 +58,28 @@ class SystemManager:
                 if backup_cpu_temp:
                     system_info["cpu_temperature"] = backup_cpu_temp
             
+            # 新增：获取内存信息
+            mem_info = await self.get_memory_info()
+            system_info.update(mem_info)
+            
+            # 新增：获取存储卷信息
+            vol_info = await self.get_vol_usage()
+            system_info["volumes"] = vol_info
+            
             return system_info
             
         except Exception as e:
             self.logger.error("Error getting system info: %s", str(e))
+            # 在异常处理中返回空数据
             return {
                 "uptime_seconds": 0,
                 "uptime": "未知",
                 "cpu_temperature": "未知",
-                "motherboard_temperature": "未知"
+                "motherboard_temperature": "未知",
+                "memory_total": "未知",
+                "memory_used": "未知",
+                "memory_available": "未知",
+                "volumes": {}
             }
     
     def save_sensor_data_for_debug(self, sensors_output: str):
@@ -192,7 +205,7 @@ class SystemManager:
                                     if isinstance(temp_value, (int, float)):
                                         self.logger.debug("JSON中找到Tdie/Tctl温度: %s/%s = %.1f°C", key, subkey, temp_value)
                                         return f"{temp_value:.1f} °C"
-                                except Exception:
+                                except:
                                     pass
             except Exception as e:
                 self.logger.warning("JSON解析失败: %s", str(e))
@@ -368,11 +381,121 @@ class SystemManager:
             self.logger.warning("Using fallback motherboard temperature detection")
             return f"{avg_temp:.1f} °C"
         
-        # self.logger.warning("No motherboard temperature found in sensors output")
         return "未知"
-
-        
     
+    async def get_memory_info(self) -> dict:
+        """获取内存使用信息"""
+        try:
+            # 使用 free 命令获取内存信息（-b 选项以字节为单位）
+            mem_output = await self.coordinator.run_command("free -b")
+            if not mem_output:
+                return {}
+            
+            # 解析输出
+            lines = mem_output.splitlines()
+            if len(lines) < 2:
+                return {}
+                
+            # 第二行是内存信息（Mem行）
+            mem_line = lines[1].split()
+            if len(mem_line) < 7:
+                return {}
+                
+            return {
+                "memory_total": int(mem_line[1]),
+                "memory_used": int(mem_line[2]),
+                "memory_available": int(mem_line[6])
+            }
+            
+        except Exception as e:
+            self.logger.error("获取内存信息失败: %s", str(e))
+            return {}
+    
+    async def get_vol_usage(self) -> dict:
+        """获取 /vol* 开头的存储卷使用信息"""
+        try:
+            # 优先使用字节单位
+            df_output = await self.coordinator.run_command("df -B 1 /vol* 2>/dev/null")
+            if df_output:
+                return self.parse_df_bytes(df_output)
+            
+            df_output = await self.coordinator.run_command("df -h /vol*")
+            if df_output:
+                return self.parse_df_human_readable(df_output)
+                
+            return {}
+        except Exception as e:
+            self.logger.error("获取存储卷信息失败: %s", str(e))
+            return {}
+    
+    def parse_df_bytes(self, df_output: str) -> dict:
+        volumes = {}
+        for line in df_output.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 6:
+                continue
+                
+            mount_point = parts[-1]
+            # 只处理 /vol 开头的挂载点
+            if not mount_point.startswith("/vol"):
+                continue
+                
+            try:
+                size_bytes = int(parts[1])
+                used_bytes = int(parts[2])
+                avail_bytes = int(parts[3])
+                use_percent = parts[4]
+                
+                def bytes_to_human(b):
+                    for unit in ['', 'K', 'M', 'G', 'T']:
+                        if abs(b) < 1024.0:
+                            return f"{b:.1f}{unit}"
+                        b /= 1024.0
+                    return f"{b:.1f}P"
+                
+                volumes[mount_point] = {
+                    "filesystem": parts[0],
+                    "size": bytes_to_human(size_bytes),
+                    "used": bytes_to_human(used_bytes),
+                    "available": bytes_to_human(avail_bytes),
+                    "use_percent": use_percent
+                }
+            except (ValueError, IndexError) as e:
+                self.logger.debug("解析存储卷行失败: %s - %s", line, str(e))
+                continue
+                    
+        return volumes
+    
+    def parse_df_human_readable(self, df_output: str) -> dict:
+        volumes = {}
+        for line in df_output.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 6:
+                continue
+                
+            mount_point = parts[-1]
+            if not mount_point.startswith("/vol"):
+                continue
+                
+            try:
+                size = parts[1]
+                used = parts[2]
+                avail = parts[3]
+                use_percent = parts[4]
+                
+                volumes[mount_point] = {
+                    "filesystem": parts[0],
+                    "size": size,
+                    "used": used,
+                    "available": avail,
+                    "use_percent": use_percent
+                }
+            except (ValueError, IndexError) as e:
+                self.logger.debug("解析存储卷行失败: %s - %s", line, str(e))
+                continue
+                
+        return volumes              
+        
     async def reboot_system(self):
         """重启系统"""
         self.logger.info("Initiating system reboot...")
@@ -380,7 +503,6 @@ class SystemManager:
             await self.coordinator.run_command("sudo reboot")
             self.logger.info("Reboot command sent")
             
-            # 更新系统状态为重启中
             if "system" in self.coordinator.data:
                 self.coordinator.data["system"]["status"] = "rebooting"
                 self.coordinator.async_update_listeners()
@@ -395,7 +517,6 @@ class SystemManager:
             await self.coordinator.run_command("sudo shutdown -h now")
             self.logger.info("Shutdown command sent")
             
-            # 立即更新系统状态为关闭
             if "system" in self.coordinator.data:
                 self.coordinator.data["system"]["status"] = "off"
                 self.coordinator.async_update_listeners()
