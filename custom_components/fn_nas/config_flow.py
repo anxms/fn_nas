@@ -18,7 +18,11 @@ from .const import (
     CONF_UPS_SCAN_INTERVAL, 
     DEFAULT_UPS_SCAN_INTERVAL,
     CONF_ROOT_PASSWORD,
-    CONF_ENABLE_DOCKER
+    CONF_ENABLE_DOCKER,
+    CONF_MAX_CONNECTIONS,
+    DEFAULT_MAX_CONNECTIONS,
+    CONF_CACHE_TIMEOUT,
+    DEFAULT_CACHE_TIMEOUT
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -71,7 +75,17 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 default=DEFAULT_SCAN_INTERVAL
             ): int,
             # 添加启用Docker的选项
-            vol.Optional(CONF_ENABLE_DOCKER, default=False): bool
+            vol.Optional(CONF_ENABLE_DOCKER, default=False): bool,
+            # 新增：最大连接数
+            vol.Optional(
+                CONF_MAX_CONNECTIONS, 
+                default=DEFAULT_MAX_CONNECTIONS
+            ): int,
+            # 新增：缓存超时时间（分钟）
+            vol.Optional(
+                CONF_CACHE_TIMEOUT, 
+                default=DEFAULT_CACHE_TIMEOUT
+            ): int
         })
         
         return self.async_show_form(
@@ -104,6 +118,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self.ssh_config[CONF_MAC] = selected_mac
                 # 确保将CONF_ENABLE_DOCKER也存入配置项
                 self.ssh_config[CONF_ENABLE_DOCKER] = enable_docker
+                # 添加连接池和缓存配置
+                self.ssh_config[CONF_MAX_CONNECTIONS] = self.ssh_config.get(CONF_MAX_CONNECTIONS, DEFAULT_MAX_CONNECTIONS)
+                self.ssh_config[CONF_CACHE_TIMEOUT] = self.ssh_config.get(CONF_CACHE_TIMEOUT, DEFAULT_CACHE_TIMEOUT)
                 return self.async_create_entry(
                     title=self.ssh_config[CONF_HOST],
                     data=self.ssh_config
@@ -220,7 +237,17 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             vol.Optional(
                 CONF_ENABLE_DOCKER,
                 default=data.get(CONF_ENABLE_DOCKER, False)
-            ): bool
+            ): bool,
+            # 新增：最大连接数
+            vol.Optional(
+                CONF_MAX_CONNECTIONS,
+                default=data.get(CONF_MAX_CONNECTIONS, DEFAULT_MAX_CONNECTIONS)
+            ): int,
+            # 新增：缓存超时时间（分钟）
+            vol.Optional(
+                CONF_CACHE_TIMEOUT,
+                default=data.get(CONF_CACHE_TIMEOUT, DEFAULT_CACHE_TIMEOUT)
+            ): int
         })
         
         return self.async_show_form(

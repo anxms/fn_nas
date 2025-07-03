@@ -53,3 +53,9 @@ ICON_RESTART = "mdi:restart"
 DEVICE_ID_NAS = "flynas_nas_system"
 DEVICE_ID_UPS = "flynas_ups"
 CONF_NETWORK_MACS = "network_macs"
+
+# 新增配置常量
+CONF_MAX_CONNECTIONS = "max_connections"
+CONF_CACHE_TIMEOUT = "cache_timeout"
+DEFAULT_MAX_CONNECTIONS = 3
+DEFAULT_CACHE_TIMEOUT = 30  # 单位：分钟

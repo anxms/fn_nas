@@ -1,7 +1,8 @@
 import re
 import logging
 import asyncio
-from .const import CONF_IGNORE_DISKS
+import time
+from .const import CONF_IGNORE_DISKS, CONF_CACHE_TIMEOUT, DEFAULT_CACHE_TIMEOUT
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -14,7 +15,10 @@ class DiskManager:
         self.disk_full_info_cache = {}  # 缓存磁盘完整信息
         self.first_run = True  # 首次运行标志
         self.initial_detection_done = False  # 首次完整检测完成标志
-    
+        self.cache_expiry = {}  # 缓存过期时间（时间戳）
+        # 获取缓存超时配置（分钟），转换为秒
+        self.cache_timeout = self.coordinator.config.get(CONF_CACHE_TIMEOUT, DEFAULT_CACHE_TIMEOUT) * 60
+
     def extract_value(self, text: str, patterns, default="未知", format_func=None):
         if not text:
             return default
@@ -38,7 +42,6 @@ class DiskManager:
     async def check_disk_active(self, device: str, window: int = 30) -> bool:
         """检查硬盘在指定时间窗口内是否有活动"""
         try:
-            # 正确的路径是 /sys/block/{device}/stat
             stat_path = f"/sys/block/{device}/stat"
             
             # 读取统计文件
@@ -91,8 +94,6 @@ class DiskManager:
             stats = stat_output.split()
             
             if len(stats) >= 11:
-                # 第9个字段是最近完成的读操作数
-                # 第10个字段是最近完成的写操作数
                 recent_reads = int(stats[8])
                 recent_writes = int(stats[9])
                 
@@ -108,6 +109,14 @@ class DiskManager:
     async def get_disks_info(self) -> list[dict]:
         disks = []
         try:
+            # 清理过期缓存
+            now = time.time()
+            for device in list(self.disk_full_info_cache.keys()):
+                if now - self.cache_expiry.get(device, 0) > self.cache_timeout:
+                    self.logger.debug(f"磁盘 {device} 的缓存已过期，清除")
+                    del self.disk_full_info_cache[device]
+                    del self.cache_expiry[device]
+            
             self.logger.debug("Fetching disk list...")
             lsblk_output = await self.coordinator.run_command("lsblk -dno NAME,TYPE")
             self.logger.debug("lsblk output: %s", lsblk_output)
@@ -148,14 +157,15 @@ class DiskManager:
                 # 检查是否有缓存的完整信息
                 cached_info = self.disk_full_info_cache.get(device, {})
                 
-                # 优化点：首次运行时强制获取完整信息
+                # 首次运行时强制获取完整信息
                 if self.first_run:
                     self.logger.debug(f"首次运行，强制获取硬盘 {device} 的完整信息")
                     try:
                         # 执行完整的信息获取
                         await self._get_full_disk_info(disk_info, device_path)
-                        # 更新缓存
+                        # 更新缓存并设置过期时间
                         self.disk_full_info_cache[device] = disk_info.copy()
+                        self.cache_expiry[device] = now
                     except Exception as e:
                         self.logger.warning(f"首次运行获取硬盘信息失败: {str(e)}", exc_info=True)
                         # 使用缓存信息（如果有）
@@ -206,8 +216,9 @@ class DiskManager:
                 try:
                     # 执行完整的信息获取
                     await self._get_full_disk_info(disk_info, device_path)
-                    # 更新缓存
+                    # 更新缓存并设置过期时间
                     self.disk_full_info_cache[device] = disk_info.copy()
+                    self.cache_expiry[device] = now
                 except Exception as e:
                     self.logger.warning(f"获取硬盘信息失败: {str(e)}", exc_info=True)
                     # 使用缓存信息（如果有）
