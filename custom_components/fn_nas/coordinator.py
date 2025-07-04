@@ -69,39 +69,46 @@ class FlynasCoordinator(DataUpdateCoordinator):
     
     async def get_ssh_connection(self):
         """从连接池获取或创建SSH连接"""
-        # 如果连接池中有可用连接且没有超过最大活动命令数
-        while len(self.ssh_pool) > 0 and self.active_commands < self.max_connections:
-            conn = self.ssh_pool.pop()
-            if await self.is_connection_alive(conn):
-                self.active_commands += 1
-                return conn
-            else:
-                await self.close_connection(conn)
-        
-        # 如果没有可用连接，创建新连接
-        if self.active_commands < self.max_connections:
-            try:
-                conn = await asyncssh.connect(
-                    self.host,
-                    port=self.port,
-                    username=self.username,
-                    password=self.password,
-                    known_hosts=None,
-                    connect_timeout=10
-                )
-                self.active_commands += 1
-                self.ssh_closed = False
-                
-                # 确定是否需要sudo权限
-                await self.determine_sudo_setting(conn)
-                
-                return conn
-            except Exception as e:
-                _LOGGER.error("创建SSH连接失败: %s", str(e), exc_info=True)
-                raise UpdateFailed(f"SSH连接失败: {str(e)}")
-        else:
+        # 避免递归调用，改为循环等待
+        start_time = time.time()
+        while True:
+            # 如果连接池中有可用连接且没有超过最大活动命令数
+            while len(self.ssh_pool) > 0 and self.active_commands < self.max_connections:
+                conn = self.ssh_pool.pop()
+                if await self.is_connection_alive(conn):
+                    self.active_commands += 1
+                    return conn
+                else:
+                    await self.close_connection(conn)
+            
+            # 如果没有可用连接，创建新连接
+            if self.active_commands < self.max_connections:
+                try:
+                    conn = await asyncssh.connect(
+                        self.host,
+                        port=self.port,
+                        username=self.username,
+                        password=self.password,
+                        known_hosts=None,
+                        connect_timeout=10
+                    )
+                    self.active_commands += 1
+                    self.ssh_closed = False
+                    
+                    # 确定是否需要sudo权限
+                    await self.determine_sudo_setting(conn)
+                    
+                    return conn
+                except Exception as e:
+                    _LOGGER.error("创建SSH连接失败: %s", str(e), exc_info=True)
+                    raise UpdateFailed(f"SSH连接失败: {str(e)}")
+            
+            # 等待0.1秒后重试，避免递归
             await asyncio.sleep(0.1)
-            return await self.get_ssh_connection()
+            
+            # 设置超时（30秒）
+            if time.time() - start_time > 30:
+                raise UpdateFailed("获取SSH连接超时")
 
     async def determine_sudo_setting(self, conn):
         """确定是否需要使用sudo权限"""
@@ -179,52 +186,58 @@ class FlynasCoordinator(DataUpdateCoordinator):
     async def run_command(self, command: str, retries=2) -> str:
         """使用连接池执行命令"""
         conn = None
-        try:
-            conn = await self.get_ssh_connection()
-            
-            # 根据sudo设置执行命令
-            if self.use_sudo:
-                password = self.root_password if self.root_password else self.password
-                if password:
-                    full_command = f"sudo -S {command}"
-                    result = await conn.run(full_command, input=password + "\n", check=True)
+        current_retries = retries
+        
+        while current_retries >= 0:
+            try:
+                conn = await self.get_ssh_connection()
+                
+                # 根据sudo设置执行命令
+                if self.use_sudo:
+                    password = self.root_password if self.root_password else self.password
+                    if password:
+                        full_command = f"sudo -S {command}"
+                        result = await conn.run(full_command, input=password + "\n", check=True)
+                    else:
+                        full_command = f"sudo {command}"
+                        result = await conn.run(full_command, check=True)
                 else:
-                    full_command = f"sudo {command}"
-                    result = await conn.run(full_command, check=True)
-            else:
-                result = await conn.run(command, check=True)
-            
-            return result.stdout.strip()
-        except asyncssh.process.ProcessError as e:
-            if e.exit_status in [4, 32]:
-                return ""
-            _LOGGER.error("Command failed: %s (exit %d)", command, e.exit_status)
-            # 连接可能已损坏，关闭它
-            await self.close_connection(conn)
-            conn = None
-            if retries > 0:
-                return await self.run_command(command, retries-1)
-            else:
-                raise UpdateFailed(f"Command failed: {command}") from e
-        except asyncssh.Error as e:
-            _LOGGER.error("SSH连接错误: %s", str(e))
-            await self.close_connection(conn)
-            conn = None
-            if retries > 0:
-                return await self.run_command(command, retries-1)
-            else:
-                raise UpdateFailed(f"SSH错误: {str(e)}") from e
-        except Exception as e:
-            _LOGGER.error("意外错误: %s", str(e), exc_info=True)
-            await self.close_connection(conn)
-            conn = None
-            if retries > 0:
-                return await self.run_command(command, retries-1)
-            else:
-                raise UpdateFailed(f"意外错误: {str(e)}") from e
-        finally:
-            if conn:
-                await self.release_ssh_connection(conn)
+                    result = await conn.run(command, check=True)
+                
+                return result.stdout.strip()
+            except asyncssh.process.ProcessError as e:
+                if e.exit_status in [4, 32]:
+                    return ""
+                _LOGGER.error("Command failed: %s (exit %d)", command, e.exit_status)
+                # 连接可能已损坏，关闭它
+                await self.close_connection(conn)
+                conn = None
+                if current_retries > 0:
+                    current_retries -= 1
+                    continue
+                else:
+                    raise UpdateFailed(f"Command failed: {command}") from e
+            except asyncssh.Error as e:
+                _LOGGER.error("SSH连接错误: %s", str(e))
+                await self.close_connection(conn)
+                conn = None
+                if current_retries > 0:
+                    current_retries -= 1
+                    continue
+                else:
+                    raise UpdateFailed(f"SSH错误: {str(e)}") from e
+            except Exception as e:
+                _LOGGER.error("意外错误: %s", str(e), exc_info=True)
+                await self.close_connection(conn)
+                conn = None
+                if current_retries > 0:
+                    current_retries -= 1
+                    continue
+                else:
+                    raise UpdateFailed(f"意外错误: {str(e)}") from e
+            finally:
+                if conn:
+                    await self.release_ssh_connection(conn)
     
     async def async_connect(self):
         """建立SSH连接（使用连接池）"""
