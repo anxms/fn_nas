@@ -1,5 +1,5 @@
 import logging
-import re
+import asyncio
 import asyncssh
 from datetime import timedelta
 from homeassistant.core import HomeAssistant
@@ -20,8 +20,10 @@ from .docker_manager import DockerManager
 _LOGGER = logging.getLogger(__name__)
 
 class FlynasCoordinator(DataUpdateCoordinator):
-    def __init__(self, hass: HomeAssistant, config) -> None:
+    def __init__(self, hass: HomeAssistant, config, config_entry) -> None:
         self.config = config
+        self.config_entry = config_entry
+        self.hass = hass
         self.host = config[CONF_HOST]
         self.port = config.get(CONF_PORT, DEFAULT_PORT)
         self.username = config[CONF_USERNAME]
@@ -60,6 +62,9 @@ class FlynasCoordinator(DataUpdateCoordinator):
         
         self.disk_manager = DiskManager(self)
         self.system_manager = SystemManager(self)
+        self._system_online = False
+        self._ping_task = None
+        self._retry_interval = 30  # 系统离线时的检测间隔（秒）
     
     async def async_connect(self):
         if self.ssh is None or self.ssh_closed:
@@ -69,7 +74,8 @@ class FlynasCoordinator(DataUpdateCoordinator):
                     port=self.port,
                     username=self.username,
                     password=self.password,
-                    known_hosts=None
+                    known_hosts=None,
+                    connect_timeout=5  # 缩短连接超时时间
                 )
                 
                 if await self.is_root_user():
@@ -81,7 +87,7 @@ class FlynasCoordinator(DataUpdateCoordinator):
                 result = await self.ssh.run(
                     f"echo '{self.password}' | sudo -S -i",
                     input=self.password + "\n",
-                    timeout=10
+                    timeout=5
                 )
                 
                 whoami_result = await self.ssh.run("whoami")
@@ -95,7 +101,7 @@ class FlynasCoordinator(DataUpdateCoordinator):
                         result = await self.ssh.run(
                             f"echo '{self.root_password}' | sudo -S -i",
                             input=self.root_password + "\n",
-                            timeout=10
+                            timeout=5
                         )
                         
                         whoami_result = await self.ssh.run("whoami")
@@ -117,13 +123,13 @@ class FlynasCoordinator(DataUpdateCoordinator):
             except Exception as e:
                 self.ssh = None
                 self.ssh_closed = True
-                _LOGGER.error("连接失败: %s", str(e), exc_info=True)
+                _LOGGER.debug("连接失败: %s", str(e))
                 return False
         return True
     
     async def is_root_user(self):
         try:
-            result = await self.ssh.run("id -u", timeout=5)
+            result = await self.ssh.run("id -u", timeout=3)
             return result.stdout.strip() == "0"
         except Exception:
             return False
@@ -133,9 +139,9 @@ class FlynasCoordinator(DataUpdateCoordinator):
             try:
                 self.ssh.close()
                 self.ssh_closed = True
-                _LOGGER.info("SSH connection closed")
+                _LOGGER.debug("SSH connection closed")
             except Exception as e:
-                _LOGGER.error("Error closing SSH connection: %s", str(e))
+                _LOGGER.debug("Error closing SSH connection: %s", str(e))
             finally:
                 self.ssh = None
     
@@ -150,14 +156,36 @@ class FlynasCoordinator(DataUpdateCoordinator):
         except (asyncssh.Error, TimeoutError):
             return False
     
+    async def ping_system(self) -> bool:
+        """轻量级系统状态检测"""
+        # 对于本地主机直接返回True
+        if self.host in ['localhost', '127.0.0.1']:
+            return True
+            
+        try:
+            # 使用异步ping检测
+            proc = await asyncio.create_subprocess_exec(
+                'ping', '-c', '1', '-W', '1', self.host,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            await proc.wait()
+            return proc.returncode == 0
+        except Exception:
+            return False
+    
     async def run_command(self, command: str, retries=2) -> str:
+        # 系统离线时直接返回空字符串，避免抛出异常
+        if not self._system_online:
+            return ""
+            
         for attempt in range(retries):
             try:
                 if not await self.is_ssh_connected():
                     if not await self.async_connect():
                         if self.data and "system" in self.data:
                             self.data["system"]["status"] = "off"
-                        raise UpdateFailed("SSH 连接失败")
+                        return ""
                 
                 if self.use_sudo:
                     if self.root_password or self.password:
@@ -175,31 +203,26 @@ class FlynasCoordinator(DataUpdateCoordinator):
             except asyncssh.process.ProcessError as e:
                 if e.exit_status in [4, 32]:
                     return ""
-                _LOGGER.error("Command failed: %s (exit %d)", command, e.exit_status)
+                _LOGGER.debug("Command failed: %s (exit %d)", command, e.exit_status)
                 self.ssh = None
                 self.ssh_closed = True
                 if attempt == retries - 1:
-                    if self.data and "system" in self.data:
-                        self.data["system"]["status"] = "off"
-                    raise UpdateFailed(f"Command failed after {retries} attempts: {command}") from e
+                    return ""
                 
             except asyncssh.Error as e:
-                _LOGGER.error("SSH connection error: %s", str(e))
+                _LOGGER.debug("SSH connection error: %s", str(e))
                 self.ssh = None
                 self.ssh_closed = True
                 if attempt == retries - 1:
-                    if self.data and "system" in self.data:
-                        self.data["system"]["status"] = "off"
-                    raise UpdateFailed(f"SSH error after {retries} attempts: {str(e)}") from e
+                    return ""
                 
             except Exception as e:
                 self.ssh = None
                 self.ssh_closed = True
-                _LOGGER.error("Unexpected error: %s", str(e), exc_info=True)
+                _LOGGER.debug("Unexpected error: %s", str(e))
                 if attempt == retries - 1:
-                    if self.data and "system" in self.data:
-                        self.data["system"]["status"] = "off"
-                    raise UpdateFailed(f"Unexpected error after {retries} attempts") from e
+                    return ""
+        return ""
     
     async def get_network_macs(self):
         try:
@@ -216,20 +239,73 @@ class FlynasCoordinator(DataUpdateCoordinator):
                 
             return macs
         except Exception as e:
-            self.logger.error("获取MAC地址失败: %s", str(e))
+            self.logger.debug("获取MAC地址失败: %s", str(e))
             return {}
+    
+    async def _monitor_system_status(self):
+        """系统离线时轮询检测状态"""
+        self.logger.debug("启动系统状态监控，每%d秒检测一次", self._retry_interval)
+        while True:
+            await asyncio.sleep(self._retry_interval)
+            
+            if await self.ping_system():
+                self.logger.info("检测到系统已开机，触发重新加载")
+                # 触发集成重新加载
+                self.hass.async_create_task(
+                    self.hass.config_entries.async_reload(self.config_entry.entry_id)
+                )
+                break
     
     async def _async_update_data(self):
         _LOGGER.debug("Starting data update...")
         
+        # 先进行轻量级系统状态检测
+        is_online = await self.ping_system()
+        self._system_online = is_online
+        
+        # 系统离线处理
+        if not is_online:
+            _LOGGER.debug("系统离线，跳过数据更新")
+            self.data["system"]["status"] = "off"
+            
+            # 启动监控任务（如果尚未启动）
+            if not self._ping_task or self._ping_task.done():
+                self._ping_task = asyncio.create_task(self._monitor_system_status())
+            
+            # 关闭SSH连接
+            await self.async_disconnect()
+            
+            return {
+                "disks": [],
+                "system": {
+                    "uptime": "未知",
+                    "cpu_temperature": "未知",
+                    "motherboard_temperature": "未知",
+                    "status": "off"
+                },
+                "ups": {},
+                "vms": [],
+                "docker_containers": []
+            }
+        
+        # 系统在线处理
         try:
-            if await self.is_ssh_connected():
-                status = "on"
-            else:
-                if not await self.async_connect():
-                    status = "off"
-                else:
-                    status = "on"
+            # 确保SSH连接
+            if not await self.async_connect():
+                self.data["system"]["status"] = "off"
+                return {
+                    "disks": [],
+                    "system": {
+                        "uptime": "未知",
+                        "cpu_temperature": "未知",
+                        "motherboard_temperature": "未知",
+                        "status": "off"
+                    },
+                    "ups": {},
+                    "vms": []
+                }
+                
+            status = "on"
             
             disks = await self.disk_manager.get_disks_info()
             system = await self.system_manager.get_system_info()
@@ -257,7 +333,12 @@ class FlynasCoordinator(DataUpdateCoordinator):
             return data
         
         except Exception as e:
-            _LOGGER.error("Failed to update data: %s", str(e), exc_info=True)
+            _LOGGER.debug("数据更新失败: %s", str(e))
+            # 检查错误类型，如果是连接问题，标记为离线
+            self._system_online = False
+            if not self._ping_task or self._ping_task.done():
+                self._ping_task = asyncio.create_task(self._monitor_system_status())
+                
             return {
                 "disks": [],
                 "system": {
@@ -297,10 +378,14 @@ class UPSDataUpdateCoordinator(DataUpdateCoordinator):
         self.ups_manager = UPSManager(main_coordinator)
     
     async def _async_update_data(self):
+        # 如果主协调器检测到系统离线，跳过UPS更新
+        if not self.main_coordinator._system_online:
+            return {}
+        
         try:
             return await self.ups_manager.get_ups_info()
         except Exception as e:
-            _LOGGER.error("Failed to update UPS data: %s", str(e), exc_info=True)
+            _LOGGER.debug("UPS数据更新失败: %s", str(e))
             return {}
 
     async def control_vm(self, vm_name, action):
@@ -311,5 +396,5 @@ class UPSDataUpdateCoordinator(DataUpdateCoordinator):
             result = await self.vm_manager.control_vm(vm_name, action)
             return result
         except Exception as e:
-            _LOGGER.error("虚拟机控制失败: %s", str(e), exc_info=True)
+            _LOGGER.debug("虚拟机控制失败: %s", str(e))
             return False
