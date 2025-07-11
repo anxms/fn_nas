@@ -111,10 +111,10 @@ class FlynasCoordinator(DataUpdateCoordinator):
                             self.ssh_closed = False
                             return True
                         else:
-                            _LOGGER.warning("切换到 root 会话失败，将使用 sudo")
+                            # 切换到 root 会话失败，将使用 sudo
                             self.use_sudo = True
                     else:
-                        _LOGGER.warning("非 root 用户且未提供 root 密码，将使用 sudo")
+                        # 非 root 用户且未提供 root 密码，将使用 sudo
                         self.use_sudo = True
                 
                 self.ssh_closed = False
@@ -258,23 +258,21 @@ class FlynasCoordinator(DataUpdateCoordinator):
     
     async def _async_update_data(self):
         _LOGGER.debug("Starting data update...")
-        
-        # 先进行轻量级系统状态检测
         is_online = await self.ping_system()
         self._system_online = is_online
-        
-        # 系统离线处理
         if not is_online:
             _LOGGER.debug("系统离线，跳过数据更新")
+            # 修复：确保 self.data 结构有效
+            if self.data is None or not isinstance(self.data, dict):
+                self.data = {}
+            if "system" not in self.data or not isinstance(self.data.get("system"), dict):
+                self.data["system"] = {}
             self.data["system"]["status"] = "off"
-            
-            # 启动监控任务（如果尚未启动）
+            # 启动后台监控任务（非阻塞）
             if not self._ping_task or self._ping_task.done():
                 self._ping_task = asyncio.create_task(self._monitor_system_status())
-            
-            # 关闭SSH连接
             await self.async_disconnect()
-            
+            # 直接返回空数据，不阻塞
             return {
                 "disks": [],
                 "system": {
