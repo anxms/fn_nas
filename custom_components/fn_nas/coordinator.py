@@ -1,4 +1,3 @@
-# coordinator.py (文档9)
 import logging
 import asyncio
 import asyncssh
@@ -36,6 +35,10 @@ class FlynasCoordinator(DataUpdateCoordinator):
         self.docker_manager = DockerManager(self) if self.enable_docker else None
         self.ssh = None
         self.ssh_closed = True
+        # SSH连接池管理
+        self.ssh_pool = []
+        self.ssh_pool_size = 3  # 连接池大小
+        self.ssh_pool_lock = asyncio.Lock()
         self.ups_manager = UPSManager(self)
         self.vm_manager = VMManager(self)
         self.use_sudo = False
@@ -61,6 +64,9 @@ class FlynasCoordinator(DataUpdateCoordinator):
         self._last_command_time = 0
         self._command_count = 0
     
+        # 添加日志方法
+        self.debug_enabled = _LOGGER.isEnabledFor(logging.DEBUG)
+    
     def get_default_data(self):
         """返回默认的数据结构"""
         return {
@@ -76,148 +82,245 @@ class FlynasCoordinator(DataUpdateCoordinator):
             "docker_containers": []
         }
     
-    async def async_connect(self):
-        """建立并保持持久SSH连接"""
-        if self.ssh is not None and not self.ssh_closed:
-            try:
-                # 测试连接是否仍然活跃
-                await self.ssh.run("echo 'connection_test'", timeout=1)
-                return True
-            except (asyncssh.Error, TimeoutError):
-                _LOGGER.debug("现有连接失效，准备重建")
-                await self.async_disconnect()
-        
+    def _debug_log(self, message: str):
+        """只在调试模式下输出详细日志"""
+        if self.debug_enabled:
+            _LOGGER.debug(message)
+
+    def _info_log(self, message: str):
+        """重要信息日志"""
+        _LOGGER.info(message)
+
+    def _warning_log(self, message: str):
+        """警告日志"""
+        _LOGGER.warning(message)
+
+    def _error_log(self, message: str):
+        """错误日志"""
+        _LOGGER.error(message)
+
+    async def get_ssh_connection(self):
+        """从连接池获取可用的SSH连接"""
+        async with self.ssh_pool_lock:
+            # 检查现有连接
+            for i, (ssh, in_use) in enumerate(self.ssh_pool):
+                if not in_use:
+                    try:
+                        # 测试连接是否活跃
+                        await asyncio.wait_for(ssh.run("echo 'test'", timeout=1), timeout=2)
+                        self.ssh_pool[i] = (ssh, True)  # 标记为使用中
+                        self._debug_log(f"复用连接池中的连接 {i}")
+                        return ssh, i
+                    except Exception:
+                        # 连接失效，移除
+                        try:
+                            ssh.close()
+                        except:
+                            pass
+                        self.ssh_pool.pop(i)
+                        break
+            
+            # 如果连接池未满，创建新连接
+            if len(self.ssh_pool) < self.ssh_pool_size:
+                try:
+                    ssh = await asyncssh.connect(
+                        self.host,
+                        port=self.port,
+                        username=self.username,
+                        password=self.password,
+                        known_hosts=None,
+                        connect_timeout=5
+                    )
+                    
+                    # 检查并设置权限状态
+                    await self._setup_connection_permissions(ssh)
+                    
+                    connection_id = len(self.ssh_pool)
+                    self.ssh_pool.append((ssh, True))
+                    self._debug_log(f"创建新的SSH连接 {connection_id}")
+                    return ssh, connection_id
+                except Exception as e:
+                    self._debug_log(f"创建SSH连接失败: {e}")
+                    raise
+            
+            # 连接池满且所有连接都在使用中，等待可用连接
+            self._debug_log("所有连接都在使用中，等待可用连接...")
+            for _ in range(50):  # 最多等待5秒
+                await asyncio.sleep(0.1)
+                for i, (ssh, in_use) in enumerate(self.ssh_pool):
+                    if not in_use:
+                        try:
+                            await asyncio.wait_for(ssh.run("echo 'test'", timeout=1), timeout=2)
+                            self.ssh_pool[i] = (ssh, True)
+                            self._debug_log(f"等待后获得连接 {i}")
+                            return ssh, i
+                        except Exception:
+                            try:
+                                ssh.close()
+                            except:
+                                pass
+                            self.ssh_pool.pop(i)
+                            break
+            
+            raise Exception("无法获取SSH连接")
+
+    async def _setup_connection_permissions(self, ssh):
+        """为新连接设置权限状态"""
         try:
-            self.ssh = await asyncssh.connect(
-                self.host,
-                port=self.port,
-                username=self.username,
-                password=self.password,
-                known_hosts=None,
-                connect_timeout=5
-            )
-            
-            self.ssh_closed = False
-            _LOGGER.info("已建立持久SSH连接到 %s", self.host)
-            
-            # 检查权限状态
-            if await self.is_root_user():
-                _LOGGER.debug("当前用户是 root")
+            # 检查是否为root用户
+            result = await ssh.run("id -u", timeout=3)
+            if result.stdout.strip() == "0":
+                self._debug_log("当前用户是 root")
                 self.use_sudo = False
-            else:
-                # 尝试切换到root会话
-                if await self.try_switch_to_root():
-                    self.use_sudo = False
+                return
             
-            return True
-        
-        except Exception as e:
-            self.ssh = None
-            self.ssh_closed = True
-            _LOGGER.debug("连接失败: %s", str(e))
-            return False
-    
-    async def try_switch_to_root(self):
-        """尝试切换到root会话"""
-        try:
+            # 尝试切换到root会话
             if self.root_password:
-                result = await self.ssh.run(
-                    f"echo '{self.root_password}' | sudo -S -i",
-                    input=self.root_password + "\n",
+                try:
+                    await ssh.run(
+                        f"echo '{self.root_password}' | sudo -S -i",
+                        input=self.root_password + "\n",
+                        timeout=5
+                    )
+                    whoami = await ssh.run("whoami")
+                    if "root" in whoami.stdout:
+                        self._info_log("成功切换到 root 会话（使用 root 密码）")
+                        self.use_sudo = False
+                        return
+                except Exception:
+                    pass
+            
+            # 尝试使用登录密码sudo
+            try:
+                await ssh.run(
+                    f"echo '{self.password}' | sudo -S -i",
+                    input=self.password + "\n",
                     timeout=5
                 )
-                whoami = await self.ssh.run("whoami")
+                whoami = await ssh.run("whoami")
                 if "root" in whoami.stdout:
-                    _LOGGER.info("成功切换到 root 会话（使用 root 密码）")
-                    return True
+                    self._info_log("成功切换到 root 会话（使用登录密码）")
+                    self.use_sudo = False
+                    return
+            except Exception:
+                pass
                 
-            result = await self.ssh.run(
-                f"echo '{self.password}' | sudo -S -i",
-                input=self.password + "\n",
-                timeout=5
-            )
-            whoami = await self.ssh.run("whoami")
-            if "root" in whoami.stdout:
-                _LOGGER.info("成功切换到 root 会话（使用登录密码）")
-                return True
-                
+            # 设置为使用sudo模式
             self.use_sudo = True
-            return False
-        except Exception:
+            self._debug_log("设置为使用sudo模式")
+            
+        except Exception as e:
+            self._debug_log(f"设置连接权限失败: {e}")
             self.use_sudo = True
-            return False
+
+    async def release_ssh_connection(self, connection_id):
+        """释放SSH连接回连接池"""
+        async with self.ssh_pool_lock:
+            if 0 <= connection_id < len(self.ssh_pool):
+                ssh, _ = self.ssh_pool[connection_id]
+                self.ssh_pool[connection_id] = (ssh, False)  # 标记为可用
+                self._debug_log(f"释放SSH连接 {connection_id}")
     
-    async def is_root_user(self):
+    async def close_all_ssh_connections(self):
+        """关闭所有SSH连接"""
+        async with self.ssh_pool_lock:
+            for ssh, _ in self.ssh_pool:
+                try:
+                    ssh.close()
+                except:
+                    pass
+            self.ssh_pool.clear()
+            self._debug_log("已关闭所有SSH连接")
+    
+    async def async_connect(self):
+        """建立并保持持久SSH连接 - 兼容旧代码"""
         try:
-            result = await self.ssh.run("id -u", timeout=3)
-            return result.stdout.strip() == "0"
+            ssh, connection_id = await self.get_ssh_connection()
+            await self.release_ssh_connection(connection_id)
+            return True
         except Exception:
             return False
     
     async def async_disconnect(self):
-        """断开SSH连接"""
-        if self.ssh is not None and not self.ssh_closed:
-            try:
-                self.ssh.close()
-                self.ssh_closed = True
-                _LOGGER.debug("已关闭SSH连接")
-            except Exception as e:
-                _LOGGER.debug("关闭SSH连接时出错: %s", str(e))
-            finally:
-                self.ssh = None
+        """断开SSH连接 - 兼容旧代码"""
+        await self.close_all_ssh_connections()
     
     async def run_command(self, command: str, retries=2) -> str:
-        """执行SSH命令，使用持久连接"""
-        current_time = asyncio.get_event_loop().time()
-        
-        # 连接冷却机制：避免短时间内频繁创建新连接
-        if current_time - self._last_command_time < 1.0 and self._command_count > 5:
-            await asyncio.sleep(0.5)
-        
-        self._last_command_time = current_time
-        self._command_count += 1
-        
+        """执行SSH命令，使用连接池"""
         # 系统离线时直接返回空字符串
         if not self._system_online:
             return ""
-            
+        
+        ssh = None
+        connection_id = None
+        
         try:
-            # 确保连接有效
-            if not await self.async_connect():
-                return ""
-                
-            # 使用sudo执行命令
+            # 从连接池获取连接
+            ssh, connection_id = await self.get_ssh_connection()
+            
+            # 构建完整命令
             if self.use_sudo:
                 if self.root_password or self.password:
                     password = self.root_password if self.root_password else self.password
                     full_command = f"sudo -S {command}"
-                    result = await self.ssh.run(full_command, input=password + "\n", timeout=10)
+                    result = await ssh.run(full_command, input=password + "\n", timeout=10)
                 else:
                     full_command = f"sudo {command}"
-                    result = await self.ssh.run(full_command, timeout=10)
+                    result = await ssh.run(full_command, timeout=10)
             else:
-                result = await self.ssh.run(command, timeout=10)
-                
+                result = await ssh.run(command, timeout=10)
+            
             return result.stdout.strip()
         
-        except (asyncssh.Error, TimeoutError) as e:
-            _LOGGER.debug("命令执行失败: %s, 错误: %s", command, str(e))
-            # 标记连接失效
-            self.ssh_closed = True
-            return ""
         except Exception as e:
-            _LOGGER.debug("执行命令时出现意外错误: %s", str(e))
-            self.ssh_closed = True
+            self._debug_log(f"命令执行失败: {command}, 错误: {str(e)}")
             return ""
+        
+        finally:
+            # 释放连接回连接池
+            if connection_id is not None:
+                await self.release_ssh_connection(connection_id)
+    
+    async def run_command_direct(self, command: str) -> str:
+        """直接执行命令，获取独立连接 - 用于并发任务"""
+        if not self._system_online:
+            return ""
+        
+        ssh = None
+        connection_id = None
+        
+        try:
+            ssh, connection_id = await self.get_ssh_connection()
+            
+            if self.use_sudo:
+                if self.root_password or self.password:
+                    password = self.root_password if self.root_password else self.password
+                    full_command = f"sudo -S {command}"
+                    result = await ssh.run(full_command, input=password + "\n", timeout=10)
+                else:
+                    full_command = f"sudo {command}"
+                    result = await ssh.run(full_command, timeout=10)
+            else:
+                result = await ssh.run(command, timeout=10)
+            
+            return result.stdout.strip()
+        
+        except Exception as e:
+            self._debug_log(f"直接命令执行失败: {command}, 错误: {str(e)}")
+            return ""
+        
+        finally:
+            if connection_id is not None:
+                await self.release_ssh_connection(connection_id)
     
     async def _monitor_system_status(self):
         """系统离线时轮询检测状态"""
-        self.logger.debug("启动系统状态监控，每%d秒检测一次", self._retry_interval)
+        self._debug_log(f"启动系统状态监控，每{self._retry_interval}秒检测一次")
         while True:
             await asyncio.sleep(self._retry_interval)
             
             if await self.ping_system():
-                self.logger.info("检测到系统已开机，触发重新加载")
+                self._info_log("检测到系统已开机，触发重新加载")
                 # 触发集成重新加载
                 self.hass.async_create_task(
                     self.hass.config_entries.async_reload(self.config_entry.entry_id)
@@ -244,45 +347,60 @@ class FlynasCoordinator(DataUpdateCoordinator):
     
     async def _async_update_data(self):
         """数据更新入口，优化命令执行频率"""
-        _LOGGER.debug("开始数据更新...")
+        self._debug_log("开始数据更新...")
         is_online = await self.ping_system()
         self._system_online = is_online
         
         if not is_online:
-            _LOGGER.debug("系统离线，跳过数据更新")
+            self._debug_log("系统离线，跳过数据更新")
             # 启动后台监控任务
             if not self._ping_task or self._ping_task.done():
                 self._ping_task = asyncio.create_task(self._monitor_system_status())
-            await self.async_disconnect()
+            await self.close_all_ssh_connections()
             return self.get_default_data()
         
         # 系统在线处理
         try:
-            # 确保连接有效
-            if not await self.async_connect():
-                return self.get_default_data()
-                
+            # 预热连接池并确保权限设置正确
+            await self.async_connect()
+            
             # 获取系统状态信息
             status = "on"
-            # 并行获取磁盘、UPS和系统信息
-            system_task = asyncio.create_task(self.system_manager.get_system_info())
-            disks_task = asyncio.create_task(self.disk_manager.get_disks_info())
-            ups_task = asyncio.create_task(self.ups_manager.get_ups_info())
-            vms_task = asyncio.create_task(self.vm_manager.get_vm_list())
             
-            # 等待并行任务完成
-            system, disks, ups_info, vms = await asyncio.gather(
-                system_task, disks_task, ups_task, vms_task
-            )
+            # 串行获取信息以确保稳定性
+            self._debug_log("开始获取系统信息...")
+            system = await self.system_manager.get_system_info()
+            self._debug_log("系统信息获取完成")
+            
+            self._debug_log("开始获取磁盘信息...")
+            disks = await self.disk_manager.get_disks_info()
+            self._debug_log(f"磁盘信息获取完成，数量: {len(disks)}")
+            
+            self._debug_log("开始获取UPS信息...")
+            ups_info = await self.ups_manager.get_ups_info()
+            self._debug_log("UPS信息获取完成")
+            
+            self._debug_log("开始获取虚拟机信息...")
+            vms = await self.vm_manager.get_vm_list()
+            self._debug_log(f"虚拟机信息获取完成，数量: {len(vms)}")
             
             # 为每个虚拟机获取标题
             for vm in vms:
-                vm["title"] = await self.vm_manager.get_vm_title(vm["name"])
+                try:
+                    vm["title"] = await self.vm_manager.get_vm_title(vm["name"])
+                except Exception as e:
+                    self._debug_log(f"获取VM标题失败 {vm['name']}: {e}")
+                    vm["title"] = vm["name"]
             
             # 获取Docker容器信息
             docker_containers = []
-            if self.enable_docker:
-                docker_containers = await self.docker_manager.get_containers()
+            if self.enable_docker and self.docker_manager:
+                self._debug_log("开始获取Docker信息...")
+                try:
+                    docker_containers = await self.docker_manager.get_containers()
+                    self._debug_log(f"Docker信息获取完成，数量: {len(docker_containers)}")
+                except Exception as e:
+                    self._debug_log(f"Docker信息获取失败: {e}")
             
             data = {
                 "disks": disks,
@@ -292,40 +410,16 @@ class FlynasCoordinator(DataUpdateCoordinator):
                 "docker_containers": docker_containers
             }
             
+            self._debug_log(f"数据更新完成: disks={len(disks)}, vms={len(vms)}, containers={len(docker_containers)}")
             return data
         
         except Exception as e:
-            _LOGGER.debug("数据更新失败: %s", str(e))
+            self._error_log(f"数据更新失败: {str(e)}")
             self._system_online = False
             if not self._ping_task or self._ping_task.done():
                 self._ping_task = asyncio.create_task(self._monitor_system_status())
                 
             return self.get_default_data()
-    
-    def get_default_data(self):
-        """获取默认数据（离线状态）"""
-        return {
-            "disks": [],
-            "system": {
-                "uptime": "未知",
-                "cpu_temperature": "未知",
-                "motherboard_temperature": "未知",
-                "status": "off"
-            },
-            "ups": {},
-            "vms": [],
-            "docker_containers": []
-        }
-    
-    async def reboot_system(self):
-        await self.system_manager.reboot_system()
-    
-    async def shutdown_system(self):
-        await self.system_manager.shutdown_system()
-        # 更新状态，但使用安全的方式
-        if self.data and isinstance(self.data, dict) and "system" in self.data:
-            self.data["system"]["status"] = "off"
-        self.async_update_listeners()
 
 class UPSDataUpdateCoordinator(DataUpdateCoordinator):
     def __init__(self, hass: HomeAssistant, config, main_coordinator):
@@ -357,10 +451,7 @@ class UPSDataUpdateCoordinator(DataUpdateCoordinator):
 
     async def control_vm(self, vm_name, action):
         try:
-            if not hasattr(self, 'vm_manager'):
-                self.vm_manager = VMManager(self)
-            
-            result = await self.vm_manager.control_vm(vm_name, action)
+            result = await self.main_coordinator.vm_manager.control_vm(vm_name, action)
             return result
         except Exception as e:
             _LOGGER.debug("虚拟机控制失败: %s", str(e))

@@ -11,9 +11,27 @@ class UPSManager:
     def __init__(self, coordinator):
         self.coordinator = coordinator
         self.logger = _LOGGER.getChild("ups_manager")
-        self.logger.setLevel(logging.DEBUG)
-        self.debug_enabled = False  # UPS调试模式开关
-        self.ups_debug_path = "/config/fn_nas_ups_debug"  # UPS调试文件保存路径
+        # 根据Home Assistant的日志级别动态设置
+        self.logger.setLevel(logging.DEBUG if _LOGGER.isEnabledFor(logging.DEBUG) else logging.INFO)
+        self.debug_enabled = _LOGGER.isEnabledFor(logging.DEBUG)  # 基于HA调试模式
+        self.ups_debug_path = "/config/fn_nas_ups_debug"
+
+    def _debug_log(self, message: str):
+        """只在调试模式下输出详细日志"""
+        if self.debug_enabled:
+            self.logger.debug(message)
+
+    def _info_log(self, message: str):
+        """重要信息日志"""
+        self.logger.info(message)
+
+    def _warning_log(self, message: str):
+        """警告日志"""
+        self.logger.warning(message)
+
+    def _error_log(self, message: str):
+        """错误日志"""
+        self.logger.error(message)
     
     async def get_ups_info(self) -> dict:
         """获取连接的UPS信息"""
@@ -31,7 +49,7 @@ class UPSManager:
         
         try:
             # 尝试使用NUT工具获取UPS信息
-            self.logger.debug("尝试使用NUT工具获取UPS信息")
+            self._debug_log("尝试使用NUT工具获取UPS信息")
             output = await self.coordinator.run_command("upsc -l")
             
             if output and "No such file" not in output:
@@ -39,11 +57,11 @@ class UPSManager:
                 ups_names = output.splitlines()
                 if ups_names:
                     ups_name = ups_names[0].strip()
-                    self.logger.debug("发现UPS: %s", ups_name)
+                    self._debug_log(f"发现UPS: {ups_name}")
                     
                     # 获取详细的UPS信息
                     ups_details = await self.coordinator.run_command(f"upsc {ups_name}")
-                    self.logger.debug("UPS详细信息: %s", ups_details)
+                    self._debug_log(f"UPS详细信息: {ups_details}")
                     
                     # 保存UPS数据以便调试
                     self.save_ups_data_for_debug(ups_details)
@@ -51,20 +69,20 @@ class UPSManager:
                     # 解析UPS信息
                     return self.parse_nut_ups_info(ups_details)
                 else:
-                    self.logger.debug("未找到连接的UPS")
+                    self._debug_log("未找到连接的UPS")
             else:
-                self.logger.debug("未安装NUT工具，尝试备用方法")
+                self._debug_log("未安装NUT工具，尝试备用方法")
             
             # 备用方法：尝试直接读取UPS状态
             return await self.get_ups_info_fallback()
             
         except Exception as e:
-            self.logger.error("获取UPS信息时出错: %s", str(e), exc_info=True)
+            self._error_log(f"获取UPS信息时出错: {str(e)}")
             return ups_info
     
     async def get_ups_info_fallback(self) -> dict:
         """备用方法获取UPS信息"""
-        self.logger.info("尝试备用方法获取UPS信息")
+        self._info_log("尝试备用方法获取UPS信息")
         ups_info = {
             "status": "未知",
             "battery_level": "未知",
@@ -81,7 +99,7 @@ class UPSManager:
             # 方法1: 检查USB连接的UPS
             usb_ups_output = await self.coordinator.run_command("lsusb | grep -i ups || echo 'No USB UPS'")
             if usb_ups_output and "No USB UPS" not in usb_ups_output:
-                self.logger.debug("检测到USB UPS设备: %s", usb_ups_output)
+                self._debug_log(f"检测到USB UPS设备: {usb_ups_output}")
                 ups_info["ups_type"] = "USB"
                 
                 # 尝试从输出中提取型号
@@ -111,7 +129,7 @@ class UPSManager:
             return ups_info
             
         except Exception as e:
-            self.logger.error("备用方法获取UPS信息失败: %s", str(e))
+            self._error_log(f"备用方法获取UPS信息失败: {str(e)}")
             return ups_info
     
     def parse_nut_ups_info(self, ups_output: str) -> dict:
@@ -253,6 +271,6 @@ class UPSManager:
             with open(filename, "w") as f:
                 f.write(ups_output)
             
-            self.logger.info("保存UPS数据到 %s 用于调试", filename)
+            self._info_log(f"保存UPS数据到 {filename} 用于调试")
         except Exception as e:
-            self.logger.error("保存UPS数据失败: %s", str(e))
+            self._error_log(f"保存UPS数据失败: {str(e)}")
