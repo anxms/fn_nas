@@ -421,6 +421,14 @@ class FlynasCoordinator(DataUpdateCoordinator):
                 
             return self.get_default_data()
 
+    async def shutdown_system(self):
+        """关闭系统 - 委托给SystemManager"""
+        return await self.system_manager.shutdown_system()
+    
+    async def reboot_system(self):
+        """重启系统 - 委托给SystemManager"""
+        return await self.system_manager.reboot_system()
+
 class UPSDataUpdateCoordinator(DataUpdateCoordinator):
     def __init__(self, hass: HomeAssistant, config, main_coordinator):
         self.config = config
