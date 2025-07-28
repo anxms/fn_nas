@@ -14,6 +14,7 @@ class DiskManager:
         self.disk_full_info_cache = {}  # 缓存磁盘完整信息
         self.first_run = True  # 首次运行标志
         self.initial_detection_done = False  # 首次完整检测完成标志
+        self.disk_io_stats_cache = {}  # 缓存磁盘I/O统计信息
     
     def extract_value(self, text: str, patterns, default="未知", format_func=None):
         if not text:
@@ -38,10 +39,9 @@ class DiskManager:
     async def check_disk_active(self, device: str, window: int = 30) -> bool:
         """检查硬盘在指定时间窗口内是否有活动"""
         try:
-            # 正确的路径是 /sys/block/{device}/stat
             stat_path = f"/sys/block/{device}/stat"
             
-            # 读取统计文件
+            # 读取当前统计文件
             stat_output = await self.coordinator.run_command(f"cat {stat_path} 2>/dev/null")
             if not stat_output:
                 self.logger.debug(f"无法读取 {stat_path}，默认返回活跃状态")
@@ -52,52 +52,148 @@ class DiskManager:
             if len(stats) < 11:
                 self.logger.debug(f"无效的统计信息格式：{stat_output}")
                 return True
-                
-            # 关键字段：当前正在进行的I/O操作数量（第9个字段，索引8）
-            in_flight = int(stats[8])
             
-            # 如果当前有I/O操作，直接返回活跃状态
-            if in_flight > 0:
+            try:
+                # /sys/block/{device}/stat 字段说明：
+                # 0: read I/Os requests      读请求次数
+                # 1: read I/Os merged        读请求合并次数
+                # 2: read sectors            读扇区数
+                # 3: read ticks              读操作耗时(ms)
+                # 4: write I/Os requests     写请求次数
+                # 5: write I/Os merged       写请求合并次数
+                # 6: write sectors           写扇区数
+                # 7: write ticks             写操作耗时(ms)
+                # 8: in_flight               当前进行中的I/O请求数
+                # 9: io_ticks                I/O活动时间(ms)
+                # 10: time_in_queue          队列中的总时间(ms)
+                
+                current_stats = {
+                    'read_ios': int(stats[0]),
+                    'write_ios': int(stats[4]),
+                    'in_flight': int(stats[8]),
+                    'io_ticks': int(stats[9])
+                }
+                
+                # 如果当前有正在进行的I/O操作，直接返回活跃状态
+                if current_stats['in_flight'] > 0:
+                    self.logger.debug(f"磁盘 {device} 有正在进行的I/O操作: {current_stats['in_flight']}")
+                    self.disk_io_stats_cache[device] = current_stats
+                    return True
+                
+                # 检查是否有缓存的统计信息
+                cached_stats = self.disk_io_stats_cache.get(device)
+                
+                if cached_stats:
+                    # 比较I/O请求次数的变化
+                    read_ios_diff = current_stats['read_ios'] - cached_stats['read_ios']
+                    write_ios_diff = current_stats['write_ios'] - cached_stats['write_ios']
+                    io_ticks_diff = current_stats['io_ticks'] - cached_stats['io_ticks']
+                    
+                    self.logger.debug(f"磁盘 {device} I/O变化: 读={read_ios_diff}, 写={write_ios_diff}, 活动时间={io_ticks_diff}ms")
+                    
+                    # 如果在检测窗口内有I/O活动，认为磁盘活跃
+                    if read_ios_diff > 0 or write_ios_diff > 0 or io_ticks_diff > 100:  # 100ms内的活动
+                        self.logger.debug(f"磁盘 {device} 在窗口期内有I/O活动")
+                        self.disk_io_stats_cache[device] = current_stats
+                        return True
+                    
+                    # 检查io_ticks是否表明最近有活动
+                    # io_ticks是累积值，如果在合理范围内增长，说明有轻微活动
+                    if io_ticks_diff > 0 and io_ticks_diff < window * 1000:  # 在窗口时间内的轻微活动
+                        self.logger.debug(f"磁盘 {device} 有轻微I/O活动")
+                        self.disk_io_stats_cache[device] = current_stats
+                        return True
+                else:
+                    # 首次检测，保存当前状态并认为活跃
+                    self.logger.debug(f"磁盘 {device} 首次检测，保存统计信息")
+                    self.disk_io_stats_cache[device] = current_stats
+                    return True
+                
+                # 更新缓存
+                self.disk_io_stats_cache[device] = current_stats
+                
+                # 检查硬盘电源状态
+                power_state = await self.get_disk_power_state(device)
+                if power_state in ["standby", "sleep", "idle"]:
+                    self.logger.debug(f"磁盘 {device} 处于省电状态: {power_state}")
+                    return False
+                
+                # 所有检查都通过，返回非活跃状态
+                self.logger.debug(f"磁盘 {device} 判定为非活跃状态")
+                return False
+                
+            except (ValueError, IndexError) as e:
+                self.logger.debug(f"解析统计信息失败: {e}")
                 return True
                 
-            # 检查I/O操作时间（第10个字段，索引9） - io_ticks（单位毫秒）
-            io_ticks = int(stats[9])
-            
-            # 如果设备在窗口时间内有I/O活动，返回活跃状态
-            if io_ticks > window * 1000:
-                return True
-                
-            # 所有检查都通过，返回非活跃状态
-            return False
-            
         except Exception as e:
-            self.logger.error(f"检测硬盘活动状态失败: {str(e)}", exc_info=True)
+            self.logger.error(f"检测硬盘活动状态失败: {str(e)}")
             return True  # 出错时默认执行检测
     
-    async def get_disk_activity(self, device: str) -> str:
-        """获取硬盘活动状态（活动中/空闲中/休眠中）"""
+    async def get_disk_power_state(self, device: str) -> str:
+        """获取硬盘电源状态"""
         try:
-            # 检查硬盘是否处于休眠状态
+            # 检查 SCSI 设备状态
             state_path = f"/sys/block/{device}/device/state"
             state_output = await self.coordinator.run_command(f"cat {state_path} 2>/dev/null || echo 'unknown'")
             state = state_output.strip().lower()
             
-            if state in ["standby", "sleep"]:
+            if state in ["running", "active"]:
+                return "active"
+            elif state in ["standby", "sleep"]:
+                return state
+            
+            # 对于某些设备，尝试通过hdparm检查状态（非侵入性）
+            hdparm_output = await self.coordinator.run_command(f"hdparm -C /dev/{device} 2>/dev/null || echo 'unknown'")
+            if "standby" in hdparm_output.lower():
+                return "standby" 
+            elif "sleeping" in hdparm_output.lower():
+                return "sleep"
+            elif "active/idle" in hdparm_output.lower():
+                return "active"
+            
+            return "unknown"
+            
+        except Exception as e:
+            self.logger.debug(f"获取磁盘 {device} 电源状态失败: {e}")
+            return "unknown"
+    
+    async def get_disk_activity(self, device: str) -> str:
+        """获取硬盘活动状态（活动中/空闲中/休眠中）"""
+        try:
+            # 先检查电源状态
+            power_state = await self.get_disk_power_state(device)
+            if power_state in ["standby", "sleep"]:
                 return "休眠中"
             
-            # 检查最近一分钟内的硬盘活动
+            # 检查最近的I/O活动
             stat_path = f"/sys/block/{device}/stat"
-            stat_output = await self.coordinator.run_command(f"cat {stat_path}")
-            stats = stat_output.split()
+            stat_output = await self.coordinator.run_command(f"cat {stat_path} 2>/dev/null")
             
-            if len(stats) >= 11:
-                # 第9个字段是最近完成的读操作数
-                # 第10个字段是最近完成的写操作数
-                recent_reads = int(stats[8])
-                recent_writes = int(stats[9])
-                
-                if recent_reads > 0 or recent_writes > 0:
-                    return "活动中"
+            if stat_output:
+                stats = stat_output.split()
+                if len(stats) >= 11:
+                    try:
+                        in_flight = int(stats[8])  # 当前进行中的I/O
+                        
+                        # 如果有正在进行的I/O，返回活动中
+                        if in_flight > 0:
+                            return "活动中"
+                        
+                        # 检查缓存的统计信息来判断近期活动
+                        cached_stats = self.disk_io_stats_cache.get(device)
+                        if cached_stats:
+                            current_read_ios = int(stats[0])
+                            current_write_ios = int(stats[4])
+                            
+                            read_diff = current_read_ios - cached_stats.get('read_ios', 0)
+                            write_diff = current_write_ios - cached_stats.get('write_ios', 0)
+                            
+                            if read_diff > 0 or write_diff > 0:
+                                return "活动中"
+                        
+                    except (ValueError, IndexError):
+                        pass
             
             return "空闲中"
             

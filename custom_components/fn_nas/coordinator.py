@@ -313,11 +313,34 @@ class FlynasCoordinator(DataUpdateCoordinator):
             if connection_id is not None:
                 await self.release_ssh_connection(connection_id)
     
+    async def ping_system(self) -> bool:
+        """轻量级系统状态检测"""
+        # 对于本地主机直接返回True
+        if self.host in ['localhost', '127.0.0.1']:
+            return True
+            
+        try:
+            # 使用异步ping检测，减少超时时间
+            proc = await asyncio.create_subprocess_exec(
+                'ping', '-c', '1', '-W', '1', self.host,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
+            )
+            await asyncio.wait_for(proc.wait(), timeout=2)  # 总超时时间2秒
+            return proc.returncode == 0
+        except Exception:
+            return False
+    
     async def _monitor_system_status(self):
         """系统离线时轮询检测状态"""
         self._debug_log(f"启动系统状态监控，每{self._retry_interval}秒检测一次")
+        
+        # 使用指数退避策略，避免频繁检测
+        check_interval = self._retry_interval
+        max_interval = 300  # 最大5分钟检测一次
+        
         while True:
-            await asyncio.sleep(self._retry_interval)
+            await asyncio.sleep(check_interval)
             
             if await self.ping_system():
                 self._info_log("检测到系统已开机，触发重新加载")
@@ -326,24 +349,10 @@ class FlynasCoordinator(DataUpdateCoordinator):
                     self.hass.config_entries.async_reload(self.config_entry.entry_id)
                 )
                 break
-    
-    async def ping_system(self) -> bool:
-        """轻量级系统状态检测"""
-        # 对于本地主机直接返回True
-        if self.host in ['localhost', '127.0.0.1']:
-            return True
-            
-        try:
-            # 使用异步ping检测
-            proc = await asyncio.create_subprocess_exec(
-                'ping', '-c', '1', '-W', '1', self.host,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
-            )
-            await proc.wait()
-            return proc.returncode == 0
-        except Exception:
-            return False
+            else:
+                # 系统仍然离线，增加检测间隔（指数退避）
+                check_interval = min(check_interval * 1.5, max_interval)
+                self._debug_log(f"系统仍离线，下次检测间隔: {check_interval}秒")
     
     async def _async_update_data(self):
         """数据更新入口，优化命令执行频率"""

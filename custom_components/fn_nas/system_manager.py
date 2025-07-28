@@ -293,90 +293,85 @@ class SystemManager:
             return {}
     
     async def get_vol_usage(self) -> dict:
-        """获取 /vol* 开头的存储卷使用信息"""
+        """获取 /vol* 开头的存储卷使用信息，避免唤醒休眠磁盘"""
         try:
-            # 优先使用字节单位
-            df_output = await self.coordinator.run_command("df -B 1 /vol* 2>/dev/null")
-            if df_output:
-                return self.parse_df_bytes(df_output)
+            # 首先检查哪些卷是活跃的，避免访问休眠磁盘
+            active_vols = await self.check_active_volumes()
             
-            df_output = await self.coordinator.run_command("df -h /vol*")
-            if df_output:
-                return self.parse_df_human_readable(df_output)
+            if active_vols:
+                # 只查询活跃的卷，避免使用通配符可能唤醒所有磁盘
+                vol_list = " ".join(active_vols)
+                df_output = await self.coordinator.run_command(f"df -B 1 {vol_list} 2>/dev/null")
+                if df_output:
+                    return self.parse_df_bytes(df_output)
                 
+                df_output = await self.coordinator.run_command(f"df -h {vol_list} 2>/dev/null")
+                if df_output:
+                    return self.parse_df_human_readable(df_output)
+            
+            # 如果没有活跃卷或者上述方法失败，使用缓存或者返回空
             return {}
+            
         except Exception as e:
             self.logger.error("获取存储卷信息失败: %s", str(e))
             return {}
     
-    def parse_df_bytes(self, df_output: str) -> dict:
-        volumes = {}
-        for line in df_output.splitlines()[1:]:
-            parts = line.split()
-            if len(parts) < 6:
-                continue
-                
-            mount_point = parts[-1]
-            # 只处理 /vol 开头的挂载点
-            if not mount_point.startswith("/vol"):
-                continue
-                
-            try:
-                size_bytes = int(parts[1])
-                used_bytes = int(parts[2])
-                avail_bytes = int(parts[3])
-                use_percent = parts[4]
-                
-                def bytes_to_human(b):
-                    for unit in ['', 'K', 'M', 'G', 'T']:
-                        if abs(b) < 1024.0:
-                            return f"{b:.1f}{unit}"
-                        b /= 1024.0
-                    return f"{b:.1f}P"
-                
-                volumes[mount_point] = {
-                    "filesystem": parts[0],
-                    "size": bytes_to_human(size_bytes),
-                    "used": bytes_to_human(used_bytes),
-                    "available": bytes_to_human(avail_bytes),
-                    "use_percent": use_percent
-                }
-            except (ValueError, IndexError) as e:
-                self.logger.debug("解析存储卷行失败: %s - %s", line, str(e))
-                continue
-                    
-        return volumes
+    async def check_active_volumes(self) -> list:
+        """检查当前活跃的存储卷，避免唤醒休眠磁盘"""
+        try:
+            # 获取所有挂载点，这个操作不会访问磁盘内容
+            mount_output = await self.coordinator.run_command("mount | grep '/vol'")
+            active_vols = []
+            
+            for line in mount_output.splitlines():
+                if '/vol' in line:
+                    # 提取挂载点
+                    parts = line.split()
+                    for part in parts:
+                        if part.startswith('/vol'):
+                            # 检查这个卷对应的磁盘是否活跃
+                            if await self.is_volume_disk_active(part):
+                                active_vols.append(part)
+                            break
+            
+            self._debug_log(f"检测到活跃存储卷: {active_vols}")
+            return active_vols
+            
+        except Exception as e:
+            self._debug_log(f"检查活跃存储卷失败: {e}")
+            return []
     
-    def parse_df_human_readable(self, df_output: str) -> dict:
-        volumes = {}
-        for line in df_output.splitlines()[1:]:
-            parts = line.split()
-            if len(parts) < 6:
-                continue
+    async def is_volume_disk_active(self, mount_point: str) -> bool:
+        """检查存储卷对应的磁盘是否活跃"""
+        try:
+            # 获取挂载点对应的设备
+            device_output = await self.coordinator.run_command(f"findmnt -n -o SOURCE {mount_point} 2>/dev/null")
+            if not device_output:
+                return False
+            
+            device = device_output.strip()
+            # 提取设备名（去掉分区号）
+            import re
+            device_match = re.search(r'/dev/([a-zA-Z]+)', device)
+            if device_match:
+                device_name = device_match.group(1)
                 
-            mount_point = parts[-1]
-            if not mount_point.startswith("/vol"):
-                continue
+                # 检查设备的I/O统计，不直接访问磁盘
+                stat_path = f"/sys/block/{device_name}/stat"
+                stat_output = await self.coordinator.run_command(f"cat {stat_path} 2>/dev/null")
                 
-            try:
-                size = parts[1]
-                used = parts[2]
-                avail = parts[3]
-                use_percent = parts[4]
-                
-                volumes[mount_point] = {
-                    "filesystem": parts[0],
-                    "size": size,
-                    "used": used,
-                    "available": avail,
-                    "use_percent": use_percent
-                }
-            except (ValueError, IndexError) as e:
-                self.logger.debug("解析存储卷行失败: %s - %s", line, str(e))
-                continue
-                
-        return volumes              
-        
+                if stat_output:
+                    stats = stat_output.split()
+                    if len(stats) >= 9:
+                        in_flight = int(stats[8])  # 当前进行中的I/O
+                        return in_flight > 0  # 有I/O活动认为是活跃的
+            
+            return False
+            
+        except Exception as e:
+            self._debug_log(f"检查卷磁盘活跃状态失败 {mount_point}: {e}")
+            return False
+    
     async def reboot_system(self):
         """重启系统"""
         self._info_log("Initiating system reboot...")
