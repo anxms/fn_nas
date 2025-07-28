@@ -295,7 +295,7 @@ class SystemManager:
     async def get_vol_usage(self) -> dict:
         """获取 /vol* 开头的存储卷使用信息，避免唤醒休眠磁盘"""
         try:
-            # 首先检查哪些卷是活跃的，避免访问休眠磁盘
+            # 首先尝试智能检测活跃卷
             active_vols = await self.check_active_volumes()
             
             if active_vols:
@@ -303,74 +303,220 @@ class SystemManager:
                 vol_list = " ".join(active_vols)
                 df_output = await self.coordinator.run_command(f"df -B 1 {vol_list} 2>/dev/null")
                 if df_output:
-                    return self.parse_df_bytes(df_output)
+                    result = self.parse_df_bytes(df_output)
+                    if result:  # 确保有数据返回
+                        return result
                 
                 df_output = await self.coordinator.run_command(f"df -h {vol_list} 2>/dev/null")
                 if df_output:
-                    return self.parse_df_human_readable(df_output)
+                    result = self.parse_df_human_readable(df_output)
+                    if result:  # 确保有数据返回
+                        return result
             
-            # 如果没有活跃卷或者上述方法失败，使用缓存或者返回空
+            # 如果智能检测失败，回退到传统方法（仅在必要时）
+            self._debug_log("智能卷检测无结果，回退到传统检测方法")
+            
+            # 优先使用字节单位，但添加错误处理
+            df_output = await self.coordinator.run_command("df -B 1 /vol* 2>/dev/null || true")
+            if df_output and "No such file or directory" not in df_output:
+                result = self.parse_df_bytes(df_output)
+                if result:
+                    return result
+            
+            df_output = await self.coordinator.run_command("df -h /vol* 2>/dev/null || true")
+            if df_output and "No such file or directory" not in df_output:
+                result = self.parse_df_human_readable(df_output)
+                if result:
+                    return result
+            
+            # 最后的回退：尝试检测任何挂载的卷
+            mount_output = await self.coordinator.run_command("mount | grep '/vol' || true")
+            if mount_output:
+                vol_points = []
+                for line in mount_output.splitlines():
+                    parts = line.split()
+                    for part in parts:
+                        if part.startswith('/vol') and part not in vol_points:
+                            vol_points.append(part)
+                
+                if vol_points:
+                    self._debug_log(f"从mount输出检测到卷: {vol_points}")
+                    vol_list = " ".join(vol_points)
+                    df_output = await self.coordinator.run_command(f"df -h {vol_list} 2>/dev/null || true")
+                    if df_output:
+                        return self.parse_df_human_readable(df_output)
+            
+            self._debug_log("所有存储卷检测方法都失败，返回空字典")
             return {}
             
         except Exception as e:
-            self.logger.error("获取存储卷信息失败: %s", str(e))
+            self._error_log(f"获取存储卷信息失败: {str(e)}")
             return {}
     
     async def check_active_volumes(self) -> list:
         """检查当前活跃的存储卷，避免唤醒休眠磁盘"""
         try:
             # 获取所有挂载点，这个操作不会访问磁盘内容
-            mount_output = await self.coordinator.run_command("mount | grep '/vol'")
+            mount_output = await self.coordinator.run_command("mount | grep '/vol' 2>/dev/null || true")
+            if not mount_output:
+                self._debug_log("未找到任何/vol挂载点")
+                return []
+            
             active_vols = []
             
             for line in mount_output.splitlines():
                 if '/vol' in line:
                     # 提取挂载点
                     parts = line.split()
-                    for part in parts:
-                        if part.startswith('/vol'):
-                            # 检查这个卷对应的磁盘是否活跃
-                            if await self.is_volume_disk_active(part):
-                                active_vols.append(part)
-                            break
+                    mount_point = None
+                    
+                    # 查找挂载点（通常在 'on' 关键词之后）
+                    try:
+                        on_index = parts.index('on')
+                        if on_index + 1 < len(parts):
+                            candidate = parts[on_index + 1]
+                            # 严格检查是否以/vol开头
+                            if candidate.startswith('/vol'):
+                                mount_point = candidate
+                    except ValueError:
+                        # 如果没有 'on' 关键词，查找以/vol开头的部分
+                        for part in parts:
+                            if part.startswith('/vol'):
+                                mount_point = part
+                                break
+                    
+                    # 过滤挂载点：只保留根级别的/vol*挂载点
+                    if mount_point and self.is_root_vol_mount(mount_point):
+                        # 检查这个卷对应的磁盘是否活跃
+                        is_active = await self.is_volume_disk_active(mount_point)
+                        if is_active:
+                            active_vols.append(mount_point)
+                            self._debug_log(f"添加活跃卷: {mount_point}")
+                        else:
+                            # 即使磁盘不活跃，也添加到列表中，但标记为可能休眠
+                            # 这样可以保证有基本的存储信息
+                            active_vols.append(mount_point)
+                            self._debug_log(f"卷 {mount_point} 对应磁盘可能休眠，但仍包含在检测中")
+                    else:
+                        self._debug_log(f"跳过非根级别vol挂载点: {mount_point}")
             
-            self._debug_log(f"检测到活跃存储卷: {active_vols}")
+            # 去重并排序
+            active_vols = sorted(list(set(active_vols)))
+            self._debug_log(f"最终检测到的根级别/vol存储卷: {active_vols}")
             return active_vols
             
         except Exception as e:
             self._debug_log(f"检查活跃存储卷失败: {e}")
             return []
     
-    async def is_volume_disk_active(self, mount_point: str) -> bool:
-        """检查存储卷对应的磁盘是否活跃"""
+    def is_root_vol_mount(self, mount_point: str) -> bool:
+        """检查是否为根级别的/vol挂载点"""
+        if not mount_point or not mount_point.startswith('/vol'):
+            return False
+        
+        # 移除开头的/vol部分进行分析
+        remainder = mount_point[4:]  # 去掉'/vol'
+        
+        # 如果remainder为空，说明是/vol，这是根级别
+        if not remainder:
+            return True
+        
+        # 如果remainder只是数字（如/vol1, /vol2），这是根级别
+        if remainder.isdigit():
+            return True
+        
+        # 如果remainder是单个字母或字母数字组合且没有斜杠，也认为是根级别
+        # 例如：/vola, /volb, /vol1a 等
+        if '/' not in remainder and len(remainder) <= 3:
+            return True
+        
+        # 其他情况都认为是子目录，如：
+        # /vol1/docker/overlay2/...
+        # /vol1/data/...
+        # /vol1/config/...
+        self._debug_log(f"检测到子目录挂载点: {mount_point}")
+        return False
+
+    def parse_df_bytes(self, df_output: str) -> dict:
+        """解析df命令的字节输出"""
+        volumes = {}
         try:
-            # 获取挂载点对应的设备
-            device_output = await self.coordinator.run_command(f"findmnt -n -o SOURCE {mount_point} 2>/dev/null")
-            if not device_output:
-                return False
-            
-            device = device_output.strip()
-            # 提取设备名（去掉分区号）
-            import re
-            device_match = re.search(r'/dev/([a-zA-Z]+)', device)
-            if device_match:
-                device_name = device_match.group(1)
-                
-                # 检查设备的I/O统计，不直接访问磁盘
-                stat_path = f"/sys/block/{device_name}/stat"
-                stat_output = await self.coordinator.run_command(f"cat {stat_path} 2>/dev/null")
-                
-                if stat_output:
-                    stats = stat_output.split()
-                    if len(stats) >= 9:
-                        in_flight = int(stats[8])  # 当前进行中的I/O
-                        return in_flight > 0  # 有I/O活动认为是活跃的
-            
-            return False
-            
+            for line in df_output.splitlines()[1:]:  # 跳过标题行
+                parts = line.split()
+                if len(parts) < 6:
+                    continue
+                    
+                mount_point = parts[-1]
+                # 严格检查只处理根级别的 /vol 挂载点
+                if not self.is_root_vol_mount(mount_point):
+                    self._debug_log(f"跳过非根级别vol挂载点: {mount_point}")
+                    continue
+                    
+                try:
+                    size_bytes = int(parts[1])
+                    used_bytes = int(parts[2])
+                    avail_bytes = int(parts[3])
+                    use_percent = parts[4]
+                    
+                    def bytes_to_human(b):
+                        for unit in ['', 'K', 'M', 'G', 'T']:
+                            if abs(b) < 1024.0:
+                                return f"{b:.1f}{unit}"
+                            b /= 1024.0
+                        return f"{b:.1f}P"
+                    
+                    volumes[mount_point] = {
+                        "filesystem": parts[0],
+                        "size": bytes_to_human(size_bytes),
+                        "used": bytes_to_human(used_bytes),
+                        "available": bytes_to_human(avail_bytes),
+                        "use_percent": use_percent
+                    }
+                    self._debug_log(f"添加根级别/vol存储卷信息: {mount_point}")
+                except (ValueError, IndexError) as e:
+                    self._debug_log(f"解析存储卷行失败: {line} - {str(e)}")
+                    continue
         except Exception as e:
-            self._debug_log(f"检查卷磁盘活跃状态失败 {mount_point}: {e}")
-            return False
+            self._error_log(f"解析df字节输出失败: {e}")
+            
+        return volumes
+    
+    def parse_df_human_readable(self, df_output: str) -> dict:
+        """解析df命令输出"""
+        volumes = {}
+        try:
+            for line in df_output.splitlines()[1:]:  # 跳过标题行
+                parts = line.split()
+                if len(parts) < 6:
+                    continue
+                    
+                mount_point = parts[-1]
+                # 严格检查只处理根级别的 /vol 挂载点
+                if not self.is_root_vol_mount(mount_point):
+                    self._debug_log(f"跳过非根级别vol挂载点: {mount_point}")
+                    continue
+                    
+                try:
+                    size = parts[1]
+                    used = parts[2]
+                    avail = parts[3]
+                    use_percent = parts[4]
+                    
+                    volumes[mount_point] = {
+                        "filesystem": parts[0],
+                        "size": size,
+                        "used": used,
+                        "available": avail,
+                        "use_percent": use_percent
+                    }
+                    self._debug_log(f"添加根级别/vol存储卷信息: {mount_point}")
+                except (ValueError, IndexError) as e:
+                    self._debug_log(f"解析存储卷行失败: {line} - {str(e)}")
+                    continue
+        except Exception as e:
+            self._error_log(f"解析df输出失败: {e}")
+                
+        return volumes
     
     async def reboot_system(self):
         """重启系统"""
